@@ -22,6 +22,7 @@ from . import links as links_module
 from . import llm as llm_module
 from .config import Settings, load_settings
 from .db import Database
+from .telegram import handle_update
 from .service import build_private_response, build_response
 from .textutil import find_urls, is_valid_capture_id, split_private
 from .vault import load_notes
@@ -83,11 +84,61 @@ def create_app(
     ask_llm = ask_llm or ask_module.ask_llm
     clock = clock or (lambda: datetime.now(ZoneInfo(settings.timezone)))
 
-    db = Database(settings.data_dir / "brain.db", ttl_hours=settings.response_ttl_hours)
+    db = Database(settings.data_dir / "brain.db", ttl_hours=settings.response_ttl_hours,
+                  outbox_ttl_days=settings.outbox_ttl_days)
     db.init()
     limiter = RateLimiter(settings.rate_limit_per_minute)
 
     app = FastAPI(title="Second Brain Gateway", docs_url=None, redoc_url=None, openapi_url=None)
+
+    async def process(*, capture_id: str, client: str, content: str, revision: int, clarifications: str) -> dict:
+        """Превращает запись в заметки. Общая часть для /capture и Telegram."""
+        # Режим «без ИИ»: текст никуда не уходит и не кэшируется
+        private, private_text = split_private(content)
+        if private:
+            logger.info("capture id=%s private chars=%d", capture_id, len(private_text))
+            return build_private_response(capture_id=capture_id, client=client, text=private_text, now=clock())
+
+        # Идемпотентность: повторный запрос возвращает прежний ответ
+        cached = db.get(capture_id, revision)
+        if cached:
+            return cached
+
+        now = clock()
+
+        # Названия по ссылкам, затем ИИ. Любой сбой даёт сохранение «как есть».
+        urls = find_urls(content)
+        link_infos = await link_fetcher(urls, settings) if urls else []
+        result = await llm(
+            settings,
+            content=content,
+            link_context=links_module.describe_for_llm(link_infos),
+            clarifications=clarifications,
+            revision=revision,
+            now=now,
+        )
+
+        response = build_response(
+            capture_id=capture_id,
+            revision=revision,
+            client=client,
+            content=content,
+            clarifications=clarifications,
+            result=result,
+            links=link_infos,
+            content_urls=urls,
+            now=now,
+            max_notes=settings.max_notes,
+        )
+        logger.info(
+            "capture id=%s rev=%d notes=%d types=%s fallback=%s chars=%d",
+            capture_id, revision, response["count"],
+            ",".join(f["type"] for f in response["files"]), response["fallback"], len(content),
+        )
+
+        db.save(capture_id=capture_id, revision=revision, response=response)
+        # Если параллельный дубль успел записаться раньше — отдаём первый ответ
+        return db.get(capture_id, revision) or response
 
     @app.get("/health")
     async def health():
@@ -130,57 +181,70 @@ def create_app(
         else:
             capture_id = f"srv-{int(time.time() * 1000)}"
 
-        # 3. Режим «без ИИ»: текст никуда не уходит и не кэшируется
+        # 3. Режим «без ИИ»: пустой текст после «!» — ошибка
         private, private_text = split_private(content)
-        if private:
-            if not private_text:
-                return _error(422, "После «!» или «секрет:» нет текста")
-            response = build_private_response(
-                capture_id=capture_id, client=payload.client, text=private_text, now=clock()
-            )
-            logger.info("capture id=%s private chars=%d", capture_id, len(private_text))
-            return response
-
-        # 4. Идемпотентность: повторный запрос возвращает прежний ответ
-        cached = db.get(capture_id, payload.revision)
-        if cached:
-            return cached
-
-        now = clock()
-
-        # 5. Названия по ссылкам, затем ИИ. Любой сбой даёт сохранение «как есть».
-        urls = find_urls(content)
-        link_infos = await link_fetcher(urls, settings) if urls else []
-        result = await llm(
-            settings,
-            content=content,
-            link_context=links_module.describe_for_llm(link_infos),
-            clarifications=payload.user_clarifications,
-            revision=payload.revision,
-            now=now,
+        if private and not private_text:
+            return _error(422, "После «!» или «секрет:» нет текста")
+        return await process(
+            capture_id=capture_id, client=payload.client, content=content,
+            revision=payload.revision, clarifications=payload.user_clarifications,
         )
 
-        response = build_response(
-            capture_id=capture_id,
-            revision=payload.revision,
-            client=payload.client,
-            content=content,
-            clarifications=payload.user_clarifications,
-            result=result,
-            links=link_infos,
-            content_urls=urls,
-            now=now,
-            max_notes=settings.max_notes,
-        )
-        logger.info(
-            "capture id=%s rev=%d notes=%d types=%s fallback=%s chars=%d",
-            capture_id, payload.revision, response["count"],
-            ",".join(f["type"] for f in response["files"]), response["fallback"], len(content),
-        )
+    def authorized(request: Request) -> bool:
+        provided = request.headers.get("x-api-key", "")
+        return hmac.compare_digest(provided.encode("utf-8"), settings.capture_token.encode("utf-8"))
 
-        db.save(capture_id=capture_id, revision=payload.revision, response=response)
-        # Если параллельный дубль успел записаться раньше — отдаём первый ответ
-        return db.get(capture_id, payload.revision) or response
+    @app.post("/telegram/webhook")
+    async def telegram_webhook(request: Request):
+        if not settings.telegram_secret:
+            return _error(404, "Not found")
+        provided = request.headers.get("x-telegram-bot-api-secret-token", "")
+        if not hmac.compare_digest(provided.encode("utf-8"), settings.telegram_secret.encode("utf-8")):
+            return _error(401, "Bad secret")
+        raw = await request.body()
+        try:
+            update = json.loads(raw)
+        except ValueError:
+            return {}
+        try:
+            reply = await handle_update(update, settings=settings, db=db, process=process)
+        except Exception as exc:  # noqa: BLE001 — Telegram не должен засыпать нас повторами
+            logger.error("telegram: ошибка обработки (%s)", type(exc).__name__)
+            message = update.get("message") if isinstance(update, dict) else None
+            chat_id = ((message or {}).get("chat") or {}).get("id")
+            if isinstance(chat_id, int) and settings.telegram_allowed_ids:
+                return {"method": "sendMessage", "chat_id": chat_id,
+                        "text": "Что-то пошло не так. Пришли сообщение ещё раз."}
+            return {}
+        return reply or {}
+
+    @app.get("/pending")
+    async def pending(request: Request, limit: int = 50):
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        items = db.pending(max(1, min(limit, 200)))
+        return {
+            "status": "success",
+            "count": len(items),
+            "remaining": db.pending_count(),
+            "items": [
+                {"id": i["id"], "filename": i["filename"], "folder": i["folder"], "markdown": i["markdown"]}
+                for i in items
+            ],
+        }
+
+    @app.post("/ack")
+    async def ack(request: Request):
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        try:
+            ids = json.loads(await request.body()).get("ids", [])
+            if not isinstance(ids, list):
+                raise ValueError
+            ids = [int(i) for i in ids]
+        except (ValueError, TypeError, AttributeError):
+            return _error(422, "Тело запроса: {\"ids\": [1, 2, 3]}")
+        return {"status": "success", "removed": db.ack(ids)}
 
     async def read_vault_request(request: Request, need_question: bool):
         """Общая часть /ask и /digest. Возвращает (ответ-ошибка | None, запрос, заметки, число приватных)."""

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,9 @@ class Settings:
     max_corpus_chars: int = 3_000_000
     ask_budget_chars: int = 80_000
     max_question_chars: int = 1000
+    telegram_secret: str = ""
+    telegram_allowed_ids: frozenset = frozenset()
+    outbox_ttl_days: float = 14.0
 
 
 def load_settings() -> Settings:
@@ -44,6 +48,13 @@ def load_settings() -> Settings:
         logger.warning(
             "DEEPSEEK_API_KEY не задан: сервис будет сохранять заметки как есть, без обработки ИИ."
         )
+
+    secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if secret and not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", secret):
+        raise RuntimeError("TELEGRAM_WEBHOOK_SECRET: 16–256 символов, только латиница, цифры, - и _.")
+    allowed = frozenset(
+        int(part) for part in re.split(r"[,\s;]+", os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")) if part.lstrip("-").isdigit()
+    )
 
     return Settings(
         capture_token=token,
@@ -61,4 +72,7 @@ def load_settings() -> Settings:
         link_max_bytes=int(os.environ.get("LINK_MAX_BYTES", "200000")),
         max_corpus_chars=int(os.environ.get("MAX_CORPUS_CHARS", "3000000")),
         ask_budget_chars=int(os.environ.get("ASK_BUDGET_CHARS", "80000")),
+        telegram_secret=secret,
+        telegram_allowed_ids=allowed,
+        outbox_ttl_days=float(os.environ.get("OUTBOX_TTL_DAYS", "14")),
     )

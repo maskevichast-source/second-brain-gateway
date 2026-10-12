@@ -260,21 +260,73 @@ $r.files[0].markdown
 
 Частота: раз в несколько дней или перед важным разговором. Если нужно сделать это одним ярлыком, пришли мне, соберу `.bat`-файл.
 
+## Часть 5. Telegram-бот (вход для записи)
+
+Бот принимает от тебя текст и ссылки, как шорткат: сервис разбирает их по схеме и отвечает «Записал: …». Если нужно, переспрашивает (ответь одним сообщением или `/skip`). Режим «без ИИ» работает так же: начни сообщение с `!`.
+
+**Как заметка попадает в хранилище.** Сервис не может писать в iCloud, поэтому готовые заметки ждут в **очереди** на сервере. Их забирает **ноутбук** (скрипт `tools/vault_sync.py`) или **телефон** (шорткат), кладёт в `0-Inbox`, и только после этого заметка стирается с сервера. Если никто не забрал, заметка удаляется через 14 дней. То есть тексты из Telegram лежат на сервере, пока не будут выгружены (это исключение из правила «ничего не храним»). Спрашивать базу голосом из Telegram нельзя: заметки в нём недоступны, для этого есть шорткат «Спросить Второй Мозг».
+
+Голос и фото бот пока не принимает. Диктуй с клавиатуры телефона или пришли текст.
+
+### Настройка (один раз, ~15 минут)
+
+**1. Создай бота.** В Telegram найди **@BotFather** → `/newbot` → придумай имя и username (заканчивается на `bot`). BotFather выдаст **токен** вида `123456:ABC...`. Это пароль от бота: никому не показывай и не присылай в чат нейросетям. (Мне он не нужен: токен используется только при одной команде ниже.)
+
+**2. Придумай секрет вебхука.** Это длинная случайная строка (латиница и цифры, от 16 символов). В PowerShell:
+```powershell
+[guid]::NewGuid().ToString("N")
+```
+Сохрани результат.
+
+**3. Добавь переменные на Railway** (сервис → Variables):
+
+| Имя | Значение |
+|---|---|
+| `TELEGRAM_WEBHOOK_SECRET` | строка из шага 2 |
+| `TELEGRAM_ALLOWED_USER_IDS` | оставь пока пустой, заполнишь на шаге 5 |
+
+Railway сам перезапустит сервис.
+
+**4. Подключи бота к сервису.** Один раз выполни в PowerShell (подставь свой токен, секрет и адрес):
+```powershell
+$token  = "ТОКЕН_ОТ_BOTFATHER"
+$secret = "СЕКРЕТ_ИЗ_ШАГА_2"
+$url    = "https://ТВОЙ-АДРЕС/telegram/webhook"
+Invoke-RestMethod "https://api.telegram.org/bot$token/setWebhook" -Method Post -Body @{ url = $url; secret_token = $secret }
+```
+Должно вернуться `ok : True`. После этого закрой окно PowerShell, токен нигде сохранять не нужно.
+
+**5. Узнай свой Telegram ID.** Напиши боту любое сообщение. Пока список разрешённых пуст, бот ответит «Бот ещё не настроен. Твой Telegram ID: 123456789». Впиши это число в `TELEGRAM_ALLOWED_USER_IDS` на Railway (можно несколько через запятую, например для жены) и дождись перезапуска. Писать боту смогут только они, остальные будут проигнорированы.
+
+**6. Проверь.** Напиши боту «купить кабель HDMI до пятницы». Должен прийти ответ «Записал: …». Команда `/status` покажет, сколько заметок ждут выгрузки.
+
+### Как забирать заметки
+
+**На ноутбуке** (нужен Python, см. часть 4). Один раз:
+```powershell
+python "$HOME\Desktop\vault_sync.py" --url https://ТВОЙ-АДРЕС --vault "C:\Users\ТВОЁ_ИМЯ\iCloudDrive\Obsidian\SecondBrain"
+```
+Токен шлюза (`CAPTURE_TOKEN`) нужно перед этим задать в той же сессии: `$env:SECOND_BRAIN_TOKEN = "ТВОЙ_ТОКЕН"`. Чтобы скрипт работал постоянно, добавь `--loop 300` (проверка каждые 5 минут) и оставь окно PowerShell открытым. Автозапуск при включении ноутбука настроим отдельно, если захочешь.
+
+**На телефоне.** Команда «Забрать из Telegram» (расписана в начале следующей сессии: она берёт `GET /pending`, сохраняет файлы так же, как «Во Второй Мозг», и отправляет `POST /ack`). Её удобно запускать автоматизацией при открытии Obsidian.
+
 ## Для разработчика
 
 ```bash
 python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements-dev.txt
-pytest                                               # 144 теста, без сети
+pytest                                               # 161 тест, без сети
 set CAPTURE_TOKEN=<не короче 24 символов>            # локальный запуск
 uvicorn app.main:create_app --factory --reload
 ```
 
-Переменные окружения: `CAPTURE_TOKEN` (обязательно), `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`, `DATA_DIR`, `APP_TIMEZONE`, `LLM_TIMEOUT_SECONDS` (60), `RATE_LIMIT_PER_MINUTE` (30), `MAX_CONTENT_CHARS` (20000), `MAX_CORPUS_CHARS` (3000000), `ASK_BUDGET_CHARS` (80000).
+Переменные окружения: `CAPTURE_TOKEN` (обязательно), `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`, `DATA_DIR`, `APP_TIMEZONE`, `LLM_TIMEOUT_SECONDS` (60), `RATE_LIMIT_PER_MINUTE` (30), `MAX_CONTENT_CHARS` (20000), `MAX_CORPUS_CHARS` (3000000), `ASK_BUDGET_CHARS` (80000), `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ALLOWED_USER_IDS`, `OUTBOX_TTL_DAYS` (14).
 
 Контракт `POST /capture` (заголовок `x-api-key`) — тело: `capture_id`, `client`, `input_type` (`text`|`url`), `content`, `revision` (1|2), `user_clarifications`. Ответ: `schema`, `count`, `files` (`filename`, `folder`, `type`, `title`, `markdown`), `needs_review_flag` (`yes`|`no`), `review_text`, `review_questions`, `message`, `fallback`, `private`. Для старого шортката первый файл продублирован в `filename`/`folder`/`markdown`.
 
 `POST /ask` — тело: `question`, `corpus` (склеенный текст заметок). Ответ: `answer`, `sources`, `sources_text`, `notes_total`, `notes_used`, `notes_omitted`, `private_skipped`, `fallback`. `POST /digest` — тело: `corpus`. Ответ: `digest`. Код: `app/vault.py` (разбор заметок), `app/ask.py` (сводка и вопросы). Ничего из присланного не сохраняется.
+
+Telegram: `POST /telegram/webhook` (заголовок `X-Telegram-Bot-Api-Secret-Token`, без `TELEGRAM_WEBHOOK_SECRET` отвечает 404), `GET /pending?limit=` и `POST /ack {"ids":[…]}` (заголовок `x-api-key`). Код: `app/telegram.py`, `tools/vault_sync.py`.
 
 Устройство: `app/schema.py` — единственный источник схемы (типы, поля, значения); из него строится промпт (`app/prompt.py`) и проверка ответа ИИ (`app/service.py`).
 
@@ -284,4 +336,5 @@ uvicorn app.main:create_app --factory --reload
 2. ✅ Вопросы на естественном языке и сводка дня.
 3. ✅ Карточки людей (скрипт для ноутбука).
 4. Индекс одним файлом (быстрее на тысячах заметок), слияние дублей.
-5. Вход через Telegram, очередь и подтверждения кнопками.
+5. ✅ Telegram-вход и очередь (основа готова, настраиваем).
+6. Голос и фото в Telegram, кнопки подтверждений.
