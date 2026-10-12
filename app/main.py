@@ -1,4 +1,4 @@
-"""Second Brain Gateway — шаг 1: приём текста и ссылок.
+"""Second Brain Gateway: приём записей и превращение их в заметки по схеме.
 
 Запуск: uvicorn app.main:create_app --factory
 """
@@ -17,11 +17,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from . import links as links_module
 from . import llm as llm_module
 from .config import Settings, load_settings
 from .db import Database
-from .service import build_response
-from .textutil import is_valid_capture_id
+from .service import build_private_response, build_response
+from .textutil import find_urls, is_valid_capture_id, split_private
 
 logger = logging.getLogger("second_brain")
 
@@ -63,12 +64,14 @@ def create_app(
     settings: Settings | None = None,
     llm: Callable[..., Awaitable] | None = None,
     clock: Callable[[], datetime] | None = None,
+    link_fetcher: Callable[..., Awaitable] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
-    llm = llm or llm_module.structure_note
+    llm = llm or llm_module.structure_capture
+    link_fetcher = link_fetcher or links_module.fetch_link_info
     clock = clock or (lambda: datetime.now(ZoneInfo(settings.timezone)))
 
-    db = Database(settings.data_dir / "brain.db")
+    db = Database(settings.data_dir / "brain.db", ttl_hours=settings.response_ttl_hours)
     db.init()
     limiter = RateLimiter(settings.rate_limit_per_minute)
 
@@ -98,7 +101,7 @@ def create_app(
             return _error(422, "Тело запроса должно быть корректным JSON с полями вроде input_type и content")
 
         if payload.input_type not in SUPPORTED_TYPES:
-            return _error(422, "Пока поддерживаются только input_type: text и url (голос, фото и PDF — в следующих шагах)")
+            return _error(422, "Пока поддерживаются только input_type: text и url (голос и фото превращает в текст сам шорткат)")
         if payload.revision not in (1, 2):
             return _error(422, "revision должен быть 1 или 2")
 
@@ -115,42 +118,55 @@ def create_app(
         else:
             capture_id = f"srv-{int(time.time() * 1000)}"
 
-        # 3. Идемпотентность: повторный запрос возвращает прежний ответ
+        # 3. Режим «без ИИ»: текст никуда не уходит и не кэшируется
+        private, private_text = split_private(content)
+        if private:
+            if not private_text:
+                return _error(422, "После «!» или «секрет:» нет текста")
+            response = build_private_response(
+                capture_id=capture_id, client=payload.client, text=private_text, now=clock()
+            )
+            logger.info("capture id=%s private chars=%d", capture_id, len(private_text))
+            return response
+
+        # 4. Идемпотентность: повторный запрос возвращает прежний ответ
         cached = db.get(capture_id, payload.revision)
         if cached:
             return cached
 
-        # 4. ИИ (при сбое note = None -> заметка сохранится как есть)
-        note = await llm(
+        now = clock()
+
+        # 5. Названия по ссылкам, затем ИИ. Любой сбой даёт сохранение «как есть».
+        urls = find_urls(content)
+        link_infos = await link_fetcher(urls, settings) if urls else []
+        result = await llm(
             settings,
-            input_type=payload.input_type,
             content=content,
+            link_context=links_module.describe_for_llm(link_infos),
             clarifications=payload.user_clarifications,
             revision=payload.revision,
+            now=now,
         )
-        if note is None:
-            logger.warning("capture %s: ИИ недоступен, сохраняем как есть", capture_id)
 
         response = build_response(
             capture_id=capture_id,
             revision=payload.revision,
             client=payload.client,
-            input_type=payload.input_type,
             content=content,
             clarifications=payload.user_clarifications,
-            note=note,
-            now=clock(),
+            result=result,
+            links=link_infos,
+            content_urls=urls,
+            now=now,
+            max_notes=settings.max_notes,
+        )
+        logger.info(
+            "capture id=%s rev=%d notes=%d types=%s fallback=%s chars=%d",
+            capture_id, payload.revision, response["count"],
+            ",".join(f["type"] for f in response["files"]), response["fallback"], len(content),
         )
 
-        db.save(
-            capture_id=capture_id,
-            revision=payload.revision,
-            client=response["yaml_frontmatter"]["source"],
-            input_type=payload.input_type,
-            content=content,
-            clarification=payload.user_clarifications,
-            response=response,
-        )
+        db.save(capture_id=capture_id, revision=payload.revision, response=response)
         # Если параллельный дубль успел записаться раньше — отдаём первый ответ
         return db.get(capture_id, payload.revision) or response
 

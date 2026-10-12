@@ -1,39 +1,263 @@
-"""Сборка ответа: имя файла, YAML и Markdown формирует код, а не нейросеть."""
+"""Сборка ответа: проверка того, что вернул ИИ, имена файлов, блок свойств и Markdown.
+
+Всё, что попадает в файл, формирует этот код. ИИ предлагает только смысловые поля.
+"""
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlparse
 
-from .llm import LLMNote
+from . import schema
+from .frontmatter import Raw, dump
+from .links import LinkInfo
+from .llm import LLMNote, LLMResult
+from .schema import Field
 from .textutil import (
     clean_tags,
     file_suffix,
     one_line,
+    parse_date,
+    parse_datetime,
+    parse_month_day,
     quote_block,
     single_url,
     slugify,
     strip_leading_yaml,
-    yaml_quote,
+    trim_words,
+    wikilink,
+    wikilinks,
 )
 
 FOLDER = "0-Inbox"
-DEFAULT_QUESTION = "О чём эта заметка и к какому проекту или делу она относится?"
+DEFAULT_QUESTION = "О чём эта заметка и к какому делу или человеку она относится?"
+ORIGINAL_MAX_REPEAT = 600  # при нескольких заметках оригинал повторяется в каждой, только если он короткий
 
 
-def _clean_client(client: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9_-]", "", (client or "").lower())[:20]
+# ---------- приведение значений полей ----------
+
+def _first(value):
+    return value[0] if isinstance(value, (list, tuple)) and value else value
+
+
+def _coerce(spec: Field, value):
+    """Приводит значение от ИИ к нужному типу. None, если значение неподходящее или пустое."""
+    if value is None or value == "" or value == [] or isinstance(value, dict):
+        return None
+    kind = spec.kind
+    if kind == "str":
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(v) for v in value if v)
+        text = one_line(value, 500)
+        return text or None
+    if kind == "list":
+        if isinstance(value, str):
+            value = [p for p in value.replace("\n", ",").replace(";", ",").split(",")]
+        if not isinstance(value, (list, tuple)):
+            return None
+        items = [one_line(v, 200) for v in value if v not in (None, "")]
+        items = [i for i in items if i][:15]
+        return items or None
+    if kind == "link":
+        return wikilink(_first(value))
+    if kind == "enum":
+        text = one_line(_first(value), 60).lower()
+        return text if text in spec.values else None
+    if kind in ("int", "num"):
+        try:
+            number = float(str(_first(value)).replace(",", ".").replace(" ", ""))
+        except ValueError:
+            return None
+        if spec.lo is not None and number < spec.lo:
+            return None
+        if spec.hi is not None and number > spec.hi:
+            return None
+        if kind == "int":
+            return int(number)
+        return int(number) if number.is_integer() else number
+    if kind == "date":
+        parsed = parse_date(_first(value))
+        return Raw(parsed) if parsed else None
+    if kind == "datetime":
+        parsed = parse_datetime(_first(value))
+        return Raw(parsed) if parsed else None
+    if kind == "md":
+        parsed = parse_month_day(_first(value))
+        if not parsed:
+            return None
+        return Raw(parsed) if len(parsed) == 10 else parsed
+    return None
+
+
+# ---------- заметка ----------
+
+@dataclass
+class Note:
+    type: str
+    title: str
+    items: list[tuple[str, object]]
+    body: str
+    original_block: str = ""
+
+    def markdown(self) -> str:
+        parts = [dump(self.items), "", self.body.strip()]
+        if self.original_block:
+            parts += ["", self.original_block]
+        parts.append("")
+        return "\n".join(parts)
+
+
+def _client_name(client: str) -> str:
+    cleaned = "".join(ch for ch in (client or "").lower() if ch.isalnum() or ch in "_-")[:20]
     return cleaned or "unknown"
 
 
-def _fallback_title(content: str, link: str | None) -> str:
+def normalize_note(
+    raw: LLMNote,
+    *,
+    content_urls: list[str],
+    links: dict[str, LinkInfo],
+    client: str,
+    capture_id: str,
+    now: datetime,
+    fallback_body: str,
+    private: bool = False,
+) -> Note:
+    note_type = raw.type if raw.type in schema.TYPES else schema.DEFAULT_TYPE
+    spec = schema.TYPES[note_type]
+
+    kind = None
+    if spec.kinds:
+        if raw.kind in spec.kinds:
+            kind = raw.kind
+        elif "другое" in spec.kinds:
+            kind = "другое"
+    status = None
+    if spec.statuses:
+        status = raw.status if raw.status in spec.statuses else spec.statuses[0]
+    area = raw.area if raw.area in schema.AREAS else schema.DEFAULT_AREA
+
+    body = strip_leading_yaml(raw.body).strip()
+    title = trim_words(raw.title or body or fallback_body, 80) or "Заметка"
+    summary = trim_words(raw.summary or title, 140)
+
+    # особые поля типа: только известные, приведённые к типу
+    fields: dict[str, object] = {}
+    for name, field_spec in spec.fields.items():
+        coerced = _coerce(field_spec, raw.fields.get(name))
+        if coerced is not None:
+            fields[name] = coerced
+
+    # ссылка: только та, что реально была в записи
+    source_url = raw.source_url if raw.source_url in content_urls else None
+    info = links.get(source_url) if source_url else None
+    if info:
+        if note_type == "media":
+            if info.channel and "creator" not in fields:
+                fields["creator"] = info.channel
+            if info.is_youtube and "platform" not in fields:
+                fields["platform"] = "YouTube"
+        if note_type == "bookmark":
+            if info.domain and "domain" not in fields:
+                fields["domain"] = info.domain
+            if info.title and "page_title" not in fields:
+                fields["page_title"] = info.title
+
+    ai_filled = [f for f in raw.ai_filled if f in schema.AI_FILLABLE and f in fields]
+    priority = raw.priority if raw.priority in schema.PRIORITIES else None
+
+    head = {
+        "schema": schema.SCHEMA_VERSION,
+        "title": title,
+        "summary": summary,
+        "created": Raw(now.strftime("%Y-%m-%dT%H:%M")),
+        "type": note_type,
+        "kind": kind,
+        "status": status,
+        "stage": "inbox",
+        "area": area,
+    }
+    tail = {
+        "priority": priority,
+        "tags": clean_tags(raw.tags),
+        "people": wikilinks(raw.people),
+        "related": wikilinks(raw.related),
+        "source": _client_name(client),
+        "source_url": source_url,
+        "private": True if private else None,
+        "ai_filled": ai_filled,
+        "capture_id": capture_id,
+        "confidence": round(raw.confidence, 2),
+    }
+    items = list(head.items()) + list(fields.items()) + list(tail.items())
+
+    if source_url and source_url not in body:
+        body = f"**Ссылка:** {source_url}" + (f"\n\n{body}" if body else "")
+    if not body:
+        body = fallback_body
+    return Note(type=note_type, title=title, items=items, body=body)
+
+
+# ---------- запасные заметки, когда ИИ недоступен ----------
+
+def _fallback_notes(content: str, links: list[LinkInfo]) -> list[LLMNote]:
+    link = single_url(content)
+    info = links[0] if link and links and links[0].url == link else None
+    if link and info and info.is_youtube and info.title:
+        return [LLMNote(
+            type="media", kind="видео", status="хочу", area="отдых", title=info.title,
+            summary=f"Видео на YouTube: {info.title}", tags=[], source_url=link,
+            fields={"creator": info.channel, "platform": "YouTube"}, confidence=0.5,
+        )]
     if link:
-        host = urlparse(link).netloc
-        return f"Ссылка: {host}" if host else "Ссылка"
-    for line in content.splitlines():
-        if line.strip():
-            return one_line(line, 60)
-    return "Заметка"
+        domain = urlparse(link).hostname or ""
+        title = info.title if info and info.title else f"Ссылка: {domain.removeprefix('www.')}"
+        body = info.description if info and info.description else ""
+        return [LLMNote(
+            type="bookmark", status="не-разобрано", title=title, summary=title, tags=["unprocessed"],
+            source_url=link, body=body, confidence=0.0,
+        )]
+    first = next((line for line in content.splitlines() if line.strip()), "Заметка")
+    return [LLMNote(
+        type="note", title=trim_words(first, 60), summary=trim_words(first, 140),
+        tags=["unprocessed"], body=content, confidence=0.0,
+    )]
+
+
+# ---------- ответ ----------
+
+def _original_block(content: str, clarifications: str) -> str:
+    text = content.strip()
+    if clarifications.strip():
+        text += f"\n\nУточнение: {clarifications.strip()}"
+    return "> [!quote]- Оригинал\n" + quote_block(text)
+
+
+def _assemble(notes: list[Note], capture_id: str, now: datetime) -> list[dict]:
+    files = []
+    for index, note in enumerate(notes):
+        seed = capture_id if len(notes) == 1 else f"{capture_id}-{index + 1}"
+        filename = f"{now:%Y-%m-%d}-{slugify(note.title)}-{file_suffix(seed)}.md"
+        files.append({
+            "filename": filename,
+            "folder": FOLDER,
+            "type": note.type,
+            "title": note.title,
+            "markdown": note.markdown(),
+        })
+    return files
+
+
+def _message(files: list[dict], *, needs_review: bool, fallback: bool, private: bool) -> str:
+    if needs_review:
+        return "Нужно уточнение"
+    if private:
+        return "Сохранено без ИИ"
+    if fallback:
+        return "ИИ недоступен — заметка сохранена как есть"
+    if len(files) == 1:
+        return f"{schema.TYPES[files[0]['type']].name}: {files[0]['title']}"
+    return f"Сохранено заметок: {len(files)}"
 
 
 def build_response(
@@ -41,111 +265,105 @@ def build_response(
     capture_id: str,
     revision: int,
     client: str,
-    input_type: str,
     content: str,
     clarifications: str,
-    note: LLMNote | None,
+    result: LLMResult | None,
+    links: list[LinkInfo],
+    content_urls: list[str],
     now: datetime,
+    max_notes: int = 10,
 ) -> dict:
     content = content.strip()
     clarifications = clarifications.strip()
-    link = single_url(content)
-    client = _clean_client(client)
-    is_fallback = note is None
+    link_map = {info.url: info for info in links}
+    fallback = result is None
+    raw_notes = _fallback_notes(content, links) if fallback else list(result.notes)
 
-    # --- смысловые поля ---
-    if note is not None:
-        title = one_line(note.title, 100) or _fallback_title(content, link)
-        note_type = note.note_type
-        tags = clean_tags(note.tags)
-        confidence = round(note.confidence, 2)
-        ai_body = strip_leading_yaml(note.content).strip()
-    else:
-        title = _fallback_title(content, link)
-        note_type = "resource" if link else "journal"
-        tags = ["unprocessed"]
-        confidence = 0.0
-        ai_body = ""
+    overflow = len(raw_notes) > max_notes
+    raw_notes = raw_notes[:max_notes]
+    single = len(raw_notes) == 1 and not overflow
+    # единственная ссылка в записи принадлежит единственной заметке
+    if single and len(content_urls) == 1 and not raw_notes[0].source_url:
+        raw_notes[0] = raw_notes[0].model_copy(update={"source_url": content_urls[0]})
 
-    # --- уточнения (human-in-the-loop) ---
-    needs_review = bool(note and note.needs_review and revision == 1 and not link)
+    notes: list[Note] = []
+    show_original_everywhere = single or len(content) <= ORIGINAL_MAX_REPEAT
+    for index, raw in enumerate(raw_notes):
+        note = normalize_note(
+            raw,
+            content_urls=content_urls,
+            links=link_map,
+            client=client,
+            capture_id=capture_id if single else f"{capture_id}-{index + 1}",
+            now=now,
+            fallback_body=content if single else "",
+        )
+        if show_original_everywhere or index == 0:
+            note.original_block = _original_block(content, clarifications)
+        notes.append(note)
+
+    if overflow:
+        rest = normalize_note(
+            LLMNote(type="note", title="Остаток записи", summary="Запись длиннее лимита заметок",
+                    tags=["не-разобрано"], body=content, confidence=0.0),
+            content_urls=content_urls, links=link_map, client=client,
+            capture_id=f"{capture_id}-rest", now=now, fallback_body=content,
+        )
+        notes.append(rest)
+
+    # вопросы: только для первой ревизии и не для одиночной ссылки
+    needs_review = bool(result and result.needs_review and revision == 1 and not single_url(content))
     questions: list[str] = []
     if needs_review:
-        questions = [q.strip() for q in note.review_questions if q.strip()][:2] or [DEFAULT_QUESTION]
+        questions = [q.strip() for q in result.review_questions if q.strip()][:2] or [DEFAULT_QUESTION]
 
-    # --- тело заметки ---
-    if link:
-        body_parts = [f"**Ссылка:** {link}"]
-        if ai_body:
-            body_parts.append(ai_body)
-        body = "\n\n".join(body_parts)
-    elif is_fallback or not ai_body:
-        body = content
-        if clarifications:
-            body += f"\n\n**Уточнение:** {clarifications}"
-    else:
-        original = content
-        if clarifications:
-            original += f"\n\nУточнение: {clarifications}"
-        body = f"{ai_body}\n\n> [!quote]- Оригинал\n{quote_block(original)}"
-
-    # --- имя файла и YAML ---
-    created = now.strftime("%Y-%m-%d %H:%M")
-    filename = f"{now:%Y-%m-%d}-{slugify(title)}-{file_suffix(capture_id)}.md"
-
-    front = {
-        "title": title,
-        "created": created,
-        "type": note_type,
-        "tags": tags,
-        "source": client,
-        "status": "inbox",
-        "confidence": confidence,
-    }
-
-    lines = [
-        "---",
-        f"title: {yaml_quote(title)}",
-        f'created: "{created}"',
-        f'type: "{note_type}"',
-    ]
-    if tags:
-        lines.append("tags:")
-        lines.extend(f"  - {tag}" for tag in tags)
-    else:
-        lines.append("tags: []")
-    lines += [
-        f"source: {yaml_quote(client)}",
-        'status: "inbox"',
-        f"confidence: {confidence}",
-        f"capture_id: {yaml_quote(capture_id)}",
-        "---",
-        "",
-        body,
-        "",
-    ]
-    markdown = "\n".join(lines)
-
-    if needs_review:
-        message = "Нужно уточнение"
-    elif is_fallback:
-        message = "ИИ недоступен — заметка сохранена как есть"
-    else:
-        message = "Заметка сохранена"
-
+    files = _assemble(notes, capture_id, now)
+    first = files[0]
     return {
         "status": "success",
+        "schema": schema.SCHEMA_VERSION,
         "capture_id": capture_id,
         "revision": revision,
         "needs_review": needs_review,
         "needs_review_flag": "yes" if needs_review else "no",
         "review_questions": questions,
         "review_text": "\n".join(questions),
-        "fallback": is_fallback,
-        "message": message,
-        "filename": filename,
-        "folder": FOLDER,
-        "yaml_frontmatter": front,
-        "markdown_body": body,
-        "markdown": markdown,
+        "fallback": fallback,
+        "private": False,
+        "count": len(files),
+        "message": _message(files, needs_review=needs_review, fallback=fallback, private=False),
+        "files": files,
+        # первый файл дублируется на верхнем уровне: старый шорткат продолжает работать
+        "filename": first["filename"],
+        "folder": first["folder"],
+        "markdown": first["markdown"],
+    }
+
+
+def build_private_response(*, capture_id: str, client: str, text: str, now: datetime) -> dict:
+    """Режим «без ИИ»: текст не покидает сервер и нигде не сохраняется."""
+    first_line = next((line for line in text.splitlines() if line.strip()), "Секретная заметка")
+    raw = LLMNote(type="note", title=trim_words(first_line, 60), tags=[], body=text, confidence=1.0)
+    note = normalize_note(
+        raw, content_urls=[], links={}, client=client, capture_id=capture_id,
+        now=now, fallback_body=text, private=True,
+    )
+    files = _assemble([note], capture_id, now)
+    return {
+        "status": "success",
+        "schema": schema.SCHEMA_VERSION,
+        "capture_id": capture_id,
+        "revision": 1,
+        "needs_review": False,
+        "needs_review_flag": "no",
+        "review_questions": [],
+        "review_text": "",
+        "fallback": False,
+        "private": True,
+        "count": 1,
+        "message": "Сохранено без ИИ",
+        "files": files,
+        "filename": files[0]["filename"],
+        "folder": files[0]["folder"],
+        "markdown": files[0]["markdown"],
     }

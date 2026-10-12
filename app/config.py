@@ -22,6 +22,10 @@ class Settings:
     llm_timeout: float
     rate_limit_per_minute: int
     max_content_chars: int
+    response_ttl_hours: float = 24.0
+    max_notes: int = 10
+    link_timeout: float = 5.0
+    link_max_bytes: int = 200_000
 
 
 def load_settings() -> Settings:
@@ -45,7 +49,11 @@ def load_settings() -> Settings:
         deepseek_base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
         data_dir=Path(os.environ.get("DATA_DIR", "./data")),
         timezone=os.environ.get("APP_TIMEZONE", "Asia/Almaty").strip(),
-        llm_timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "40")),
+        llm_timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "60")),
         rate_limit_per_minute=int(os.environ.get("RATE_LIMIT_PER_MINUTE", "30")),
         max_content_chars=int(os.environ.get("MAX_CONTENT_CHARS", "20000")),
+        response_ttl_hours=float(os.environ.get("RESPONSE_TTL_HOURS", "24")),
+        max_notes=int(os.environ.get("MAX_NOTES_PER_CAPTURE", "10")),
+        link_timeout=float(os.environ.get("LINK_TIMEOUT_SECONDS", "5")),
+        link_max_bytes=int(os.environ.get("LINK_MAX_BYTES", "200000")),
     )

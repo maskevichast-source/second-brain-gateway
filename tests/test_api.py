@@ -1,19 +1,31 @@
 import re
+import sqlite3
+import time
 
 import pytest
 
 from app.config import load_settings
-from app.llm import LLMNote
+from app.db import Database
+from app.links import LinkInfo
 
-from .conftest import StubLLM, auth
+from .conftest import StubLinks, StubLLM, auth, note, result
 
 CID = "20261012-093000-482913"
+TEXT = "купить кабель HDMI до пятницы"
 
 
 def post(client, **fields):
-    body = {"capture_id": CID, "input_type": "text", "content": "купить кабель HDMI до пятницы"}
+    body = {"capture_id": CID, "input_type": "text", "content": TEXT}
     body.update(fields)
     return client.post("/capture", json=body, headers=auth())
+
+
+@pytest.fixture
+def task_result():
+    return result(
+        note(type="task", status="открыто", area="дом", title="Купить кабель HDMI",
+             tags=["дом", "покупки"], body="Купить кабель HDMI до пятницы", confidence=0.93)
+    )
 
 
 def test_health_needs_no_auth(make_client):
@@ -35,40 +47,40 @@ def test_auth_required(make_client, headers):
 
 
 def test_auth_checked_before_body_validation(make_client):
-    response = make_client(StubLLM()).post("/capture", content=b"not json")
-    assert response.status_code == 401
+    assert make_client(StubLLM()).post("/capture", content=b"not json").status_code == 401
 
 
-def test_happy_path_text(make_client, good_note):
-    llm = StubLLM(good_note)
+def test_happy_path_text(make_client, task_result):
+    llm = StubLLM(task_result)
     data = post(make_client(llm)).json()
 
-    assert data["status"] == "success"
+    assert data["status"] == "success" and data["schema"] == 1
     assert data["needs_review"] is False and data["needs_review_flag"] == "no"
+    assert data["count"] == 1 and len(data["files"]) == 1 and data["private"] is False
+    file = data["files"][0]
+    # обратная совместимость: первый файл продублирован наверху
+    assert data["filename"] == file["filename"] and data["markdown"] == file["markdown"]
     assert data["folder"] == "0-Inbox"
-    assert data["fallback"] is False
-    assert re.fullmatch(r"2026-10-12-купить-кабель-hdmi-[0-9a-f]{6}\.md", data["filename"])
+    assert re.fullmatch(r"2026-10-12-купить-кабель-hdmi-[0-9a-f]{6}\.md", file["filename"])
 
-    md = data["markdown"]
-    assert md.startswith('---\ntitle: "Купить кабель HDMI"\n')
-    assert 'created: "2026-10-12 09:30"' in md
-    assert 'type: "task"' in md
+    md = file["markdown"]
+    assert md.startswith('---\nschema: 1\ntitle: "Купить кабель HDMI"\n')
+    assert "created: 2026-10-12T09:30\n" in md
+    assert 'type: "task"' in md and 'status: "открыто"' in md and 'stage: "inbox"' in md
     assert "tags:\n  - дом\n  - покупки\n" in md
-    assert "confidence: 0.93" in md
     assert f'capture_id: "{CID}"' in md
-    assert "- [ ] Купить кабель HDMI до пятницы" in md
-    # исходный текст всегда сохраняется
     assert "> [!quote]- Оригинал\n> купить кабель HDMI до пятницы" in md
-    assert llm.calls[0]["content"] == "купить кабель HDMI до пятницы"
+    assert llm.calls[0]["content"] == TEXT
+    assert llm.calls[0]["revision"] == 1
 
 
-def test_extra_fields_from_future_clients_are_ignored(make_client, good_note):
-    response = post(make_client(StubLLM(good_note)), file_base64="", file_name="", timestamp="2026-10-12T04:30:00Z")
+def test_extra_fields_from_future_clients_are_ignored(make_client, task_result):
+    response = post(make_client(StubLLM(task_result)), file_base64="", timestamp="2026-10-12T04:30:00Z")
     assert response.status_code == 200
 
 
-def test_idempotent_by_capture_id(make_client, good_note):
-    llm = StubLLM(good_note)
+def test_idempotent_by_capture_id(make_client, task_result):
+    llm = StubLLM(task_result)
     client = make_client(llm)
     first = post(client).json()
     second = post(client).json()
@@ -77,14 +89,10 @@ def test_idempotent_by_capture_id(make_client, good_note):
 
 
 def test_needs_review_then_clarification(make_client):
-    ambiguous = LLMNote(
-        title="Позвонить",
-        note_type="task",
-        tags=["звонок"],
-        confidence=0.3,
+    ambiguous = result(
+        note(type="task", title="Позвонить", body="Позвонить", confidence=0.3),
         needs_review=True,
-        review_questions=["Кому?", "По какому делу?", "Лишний третий вопрос"],
-        content="Позвонить",
+        questions=["Кому?", "По какому делу?", "Лишний третий вопрос"],
     )
     llm = StubLLM(ambiguous)
     client = make_client(llm)
@@ -95,80 +103,101 @@ def test_needs_review_then_clarification(make_client):
     assert first["review_text"] == "Кому?\nПо какому делу?"
     assert first["message"] == "Нужно уточнение"
 
-    second = post(client, content="позвонить тому парню", revision=2, user_clarifications="Серику, про ремонт").json()
+    second = post(client, content="позвонить тому парню", revision=2,
+                  user_clarifications="Серику, про ремонт").json()
     assert second["needs_review"] is False and second["needs_review_flag"] == "no"
-    assert second["review_questions"] == []
+    assert second["review_questions"] == [] and second["review_text"] == ""
     assert llm.calls[1]["clarifications"] == "Серику, про ремонт"
     assert llm.calls[1]["revision"] == 2
-    assert "Уточнение: Серику, про ремонт" in second["markdown"]
+    assert "Уточнение: Серику, про ремонт" in second["files"][0]["markdown"]
 
 
 def test_needs_review_without_questions_gets_default(make_client):
-    note = LLMNote(title="Х", content="х", needs_review=True, review_questions=[])
-    data = post(make_client(StubLLM(note))).json()
+    data = post(make_client(StubLLM(result(note(body="х"), needs_review=True)))).json()
     assert data["needs_review"] is True
     assert len(data["review_questions"]) == 1
 
 
 def test_fallback_when_llm_unavailable_keeps_note(make_client):
     data = post(make_client(StubLLM(None)), content="Важная мысль\nвторая строка").json()
-    assert data["fallback"] is True
-    assert data["needs_review"] is False
-    assert data["message"] == "ИИ недоступен — заметка сохранена как есть"
-    assert data["yaml_frontmatter"]["title"] == "Важная мысль"
-    assert data["yaml_frontmatter"]["confidence"] == 0.0
-    assert "  - unprocessed" in data["markdown"]
-    assert "Важная мысль\nвторая строка" in data["markdown"]
+    assert data["fallback"] is True and data["needs_review"] is False
+    assert "ИИ недоступен" in data["message"]
+    md = data["files"][0]["markdown"]
+    assert 'title: "Важная мысль"' in md and "  - unprocessed" in md
+    assert "Важная мысль\nвторая строка" in md
 
 
 def test_llm_output_cannot_break_filename_or_yaml(make_client):
-    hostile = LLMNote(
-        title='../../etc/passwd: "хитрый" заголовок\nstatus: hacked',
-        note_type="concept",
-        tags=["ok", "ev il", "---"],
-        content="---\nstatus: hacked\n---\n\nЧистый текст",
+    hostile = result(
+        note(
+            type="idea",
+            title='../../etc/passwd: "хитрый" заголовок\nstatus: hacked',
+            tags=["ok", "ev il", "---"],
+            body="---\nstatus: hacked\n---\n\nЧистый текст",
+        )
     )
     data = post(make_client(StubLLM(hostile))).json()
-
-    assert "/" not in data["filename"] and "\\" not in data["filename"] and ".." not in data["filename"]
-    assert data["filename"].endswith(".md")
-    lines = data["markdown"].split("\n")
+    file = data["files"][0]
+    assert "/" not in file["filename"] and "\\" not in file["filename"] and ".." not in file["filename"]
+    assert file["filename"].endswith(".md")
+    lines = file["markdown"].split("\n")
     assert lines[0] == "---"
-    end = lines.index("---", 1)  # закрывающая черта frontmatter — ровно одна
-    front = lines[1:end]
-    # служебные ключи не продублированы, заголовок остался одной строкой
-    assert [line for line in front if line.startswith("status:")] == ['status: "inbox"']
-    assert len([line for line in front if line.startswith("title:")]) == 1
-    # чужой блок --- ... --- из тела вырезан
-    assert "hacked" not in "\n".join(lines[end + 1 :])
-    assert data["markdown_body"].startswith("Чистый текст")
-    assert data["yaml_frontmatter"]["tags"] == ["ok", "ev-il"]
+    end = lines.index("---", 1)
+    block = lines[1:end]
+    assert len([line for line in block if line.startswith("title:")]) == 1
+    assert not [line for line in block if line.startswith("status: hacked")]
+    assert "hacked" not in "\n".join(lines[end + 1:])
+    assert "Чистый текст" in "\n".join(lines[end + 1:])
+    assert "  - ev-il" in block
 
 
-def test_single_url_is_saved_as_link_without_review(make_client):
-    note = LLMNote(
-        title="Статья про Obsidian",
-        note_type="resource",
-        tags=["obsidian"],
-        needs_review=True,  # для ссылок игнорируется
-        content="Содержимое страницы не загружалось.",
-    )
-    data = post(make_client(StubLLM(note)), content="https://example.com/post?id=1").json()
-    assert data["needs_review"] is False
-    assert "**Ссылка:** https://example.com/post?id=1" in data["markdown"]
-    assert "Оригинал" not in data["markdown"]
+def test_link_context_is_passed_to_llm_and_links_fetched(make_client, task_result):
+    links = StubLinks([LinkInfo(url="https://example.com/post", title="Статья про память", domain="example.com")])
+    llm = StubLLM(task_result)
+    post(make_client(llm, links), content="глянуть https://example.com/post")
+    assert links.calls == [["https://example.com/post"]]
+    assert "Статья про память" in llm.calls[0]["link_context"]
 
 
-def test_link_fallback_title_uses_host(make_client):
+def test_no_links_means_no_fetch(make_client, task_result):
+    links = StubLinks()
+    post(make_client(StubLLM(task_result), links))
+    assert links.calls == []
+
+
+def test_single_url_fallback_is_bookmark_without_review(make_client):
     data = post(make_client(StubLLM(None)), input_type="url", content="https://example.com/a").json()
-    assert data["yaml_frontmatter"]["title"] == "Ссылка: example.com"
-    assert data["yaml_frontmatter"]["type"] == "resource"
+    md = data["files"][0]["markdown"]
+    assert data["needs_review"] is False
+    assert 'title: "Ссылка: example.com"' in md and 'type: "bookmark"' in md
 
 
-def test_url_type_with_plain_text_is_treated_as_text(make_client, good_note):
-    data = post(make_client(StubLLM(good_note)), input_type="url", content="посмотри потом https://x.com").json()
+def test_url_type_with_plain_text_is_treated_as_text(make_client, task_result):
+    data = post(make_client(StubLLM(task_result)), input_type="url", content="посмотри потом https://x.com").json()
     assert "Оригинал" in data["markdown"]
 
+
+# ---------- режим «без ИИ» ----------
+
+@pytest.mark.parametrize("text", ["! пароль от сейфа 4321", "секрет: пароль от сейфа 4321"])
+def test_private_mode_skips_llm_links_and_cache(make_client, text, tmp_path):
+    llm, links = StubLLM(), StubLinks()
+    client = make_client(llm, links)
+    data = post(client, content=text + " https://example.com").json()
+    assert data["private"] is True and data["fallback"] is False and data["needs_review"] is False
+    assert llm.calls == [] and links.calls == []
+    md = data["files"][0]["markdown"]
+    assert "пароль от сейфа 4321" in md and "private: true" in md
+    assert "! пароль" not in md and "секрет:" not in md
+    conn = sqlite3.connect(tmp_path / "data" / "brain.db")
+    assert conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0] == 0
+
+
+def test_private_mode_needs_text(make_client):
+    assert post(make_client(StubLLM()), content="!").status_code == 422
+
+
+# ---------- валидация ----------
 
 @pytest.mark.parametrize("kind", ["audio", "image", "pdf", "video"])
 def test_unsupported_types_are_rejected_clearly(make_client, kind):
@@ -186,35 +215,67 @@ def test_validation_errors(make_client, fields):
 
 
 def test_invalid_json_returns_422(make_client):
-    response = make_client(StubLLM()).post("/capture", content=b"{oops", headers=auth())
-    assert response.status_code == 422
+    assert make_client(StubLLM()).post("/capture", content=b"{oops", headers=auth()).status_code == 422
 
 
 def test_too_long_content(make_client):
-    response = post(make_client(StubLLM(), max_content_chars=100), content="а" * 101)
-    assert response.status_code == 413
+    assert post(make_client(StubLLM(), max_content_chars=100), content="а" * 101).status_code == 413
 
 
-def test_missing_capture_id_is_generated(make_client, good_note):
-    client = make_client(StubLLM(good_note))
-    response = client.post("/capture", json={"content": "без id"}, headers=auth())
+def test_missing_capture_id_is_generated(make_client, task_result):
+    response = make_client(StubLLM(task_result)).post("/capture", json={"content": "без id"}, headers=auth())
     assert response.status_code == 200
     assert response.json()["capture_id"].startswith("srv-")
 
 
-def test_rate_limit(make_client, good_note):
-    client = make_client(StubLLM(good_note), rate_limit_per_minute=3)
+def test_rate_limit(make_client, task_result):
+    client = make_client(StubLLM(task_result), rate_limit_per_minute=3)
     codes = [post(client, capture_id=f"id-number-{i:04d}").status_code for i in range(5)]
     assert codes == [200, 200, 200, 429, 429]
 
 
-def test_original_is_stored_in_database(make_client, good_note, tmp_path):
-    import sqlite3
+def test_many_notes_in_one_capture(make_client):
+    many = result(*[note(title=f"Заметка {i}", body=f"тело {i}") for i in range(3)])
+    data = post(make_client(StubLLM(many))).json()
+    assert data["count"] == 3
+    names = [f["filename"] for f in data["files"]]
+    assert len(set(names)) == 3
 
-    post(make_client(StubLLM(good_note)))
+
+# ---------- хранение: тексты на сервере не лежат ----------
+
+def test_database_holds_no_note_text_except_short_lived_response(make_client, task_result, tmp_path):
+    post(make_client(StubLLM(task_result)))
     conn = sqlite3.connect(tmp_path / "data" / "brain.db")
-    row = conn.execute("SELECT content, revision FROM captures WHERE capture_id = ?", (CID,)).fetchone()
-    assert row == ("купить кабель HDMI до пятницы", 1)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert tables == {"responses"}
+
+
+def test_expired_responses_are_purged(tmp_path):
+    db = Database(tmp_path / "x.db", ttl_hours=24)
+    db.init()
+    db.save(capture_id="old-capture-1", revision=1, response={"a": 1})
+    conn = sqlite3.connect(tmp_path / "x.db")
+    conn.execute("UPDATE responses SET created_at = ?", (time.time() - 25 * 3600,))
+    conn.commit()
+    conn.close()
+    db.save(capture_id="new-capture-1", revision=1, response={"b": 2})
+    assert db.get("old-capture-1", 1) is None
+    assert db.get("new-capture-1", 1) == {"b": 2}
+
+
+def test_legacy_captures_table_is_dropped(tmp_path):
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE captures (capture_id TEXT, revision INT, content TEXT)")
+    conn.execute("INSERT INTO captures VALUES ('x', 1, 'секретный текст')")
+    conn.commit()
+    conn.close()
+    Database(path, ttl_hours=24).init()
+    conn = sqlite3.connect(path)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "captures" not in tables
+    assert b"\xd1\x81\xd0\xb5\xd0\xba\xd1\x80\xd0\xb5\xd1\x82" not in path.read_bytes()
 
 
 def test_settings_require_strong_token(monkeypatch):

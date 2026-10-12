@@ -9,11 +9,11 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import Settings  # noqa: E402
-from app.llm import LLMNote  # noqa: E402
+from app.llm import LLMNote, LLMResult  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 TOKEN = "t" * 32
-FIXED_NOW = datetime(2026, 10, 12, 9, 30, tzinfo=ZoneInfo("Asia/Almaty"))
+FIXED_NOW = datetime(2026, 10, 12, 9, 30, tzinfo=ZoneInfo("Asia/Almaty"))  # понедельник
 
 
 def make_settings(tmp_path, **overrides) -> Settings:
@@ -32,34 +32,67 @@ def make_settings(tmp_path, **overrides) -> Settings:
     return Settings(**base)
 
 
+def note(**kwargs) -> LLMNote:
+    kwargs.setdefault("title", "Заметка")
+    return LLMNote(**kwargs)
+
+
+def result(*notes, needs_review=False, questions=()) -> LLMResult:
+    return LLMResult(notes=list(notes), needs_review=needs_review, review_questions=list(questions))
+
+
 class StubLLM:
     """Подменяет вызов DeepSeek и запоминает, с чем его вызывали."""
 
-    def __init__(self, note=None):
-        self.note = note
+    def __init__(self, value=None):
+        self.value = value
         self.calls = []
 
     async def __call__(self, settings, **kwargs):
         self.calls.append(kwargs)
-        return self.note
+        return self.value
+
+
+class StubLinks:
+    def __init__(self, infos=None):
+        self.infos = infos or []
+        self.calls = []
+
+    async def __call__(self, urls, settings):
+        self.calls.append(list(urls))
+        return self.infos
 
 
 @pytest.fixture
-def good_note():
-    return LLMNote(
-        title="Купить кабель HDMI",
-        note_type="task",
-        tags=["Дом", "#покупки"],
-        confidence=0.93,
-        content="- [ ] Купить кабель HDMI до пятницы",
+def movie_result():
+    return result(
+        note(
+            type="media",
+            kind="фильм",
+            status="хочу",
+            area="отдых",
+            title="Дюна: часть вторая",
+            summary="Фильм, посоветовал Серик",
+            tags=["Кино", "#фантастика"],
+            people=["Серик"],
+            fields={"year": 2024, "creator": "Дени Вильнёв", "recommended_by": "Серик"},
+            ai_filled=["year", "creator"],
+            body="Фильм посоветовал Серик. Хочу посмотреть.",
+            confidence=0.92,
+        )
     )
 
 
 @pytest.fixture
 def make_client(tmp_path):
-    def _make(llm=None, **overrides):
+    def _make(llm=None, links=None, **overrides):
         settings = make_settings(tmp_path, **overrides)
-        app = create_app(settings=settings, llm=llm, clock=lambda: FIXED_NOW)
+        app = create_app(
+            settings=settings,
+            llm=llm or StubLLM(None),
+            clock=lambda: FIXED_NOW,
+            link_fetcher=links or StubLinks(),
+        )
         return TestClient(app)
 
     return _make
