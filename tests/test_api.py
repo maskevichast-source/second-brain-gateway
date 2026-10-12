@@ -284,3 +284,61 @@ def test_settings_require_strong_token(monkeypatch):
         load_settings()
     monkeypatch.setenv("CAPTURE_TOKEN", "x" * 24)
     assert load_settings().capture_token == "x" * 24
+
+
+# ---------- вопросы и сводка ----------
+
+from .conftest import StubAsk, vault_note  # noqa: E402
+
+CORPUS = "\n=====NOTE=====\n".join([
+    vault_note("Дюна 2", type="media", kind='"фильм"', status='"хочу"', created="2026-10-11T20:00"),
+    vault_note("Пароль от сейфа 4321", private=True),
+    vault_note("Позвонить Серику", type="task", status='"открыто"', due="2026-10-10"),
+])
+
+
+def ask_post(client, path="/ask", **fields):
+    body = {"question": "какие фильмы планировал?", "corpus": CORPUS}
+    body.update(fields)
+    return client.post(path, json=body, headers=auth())
+
+
+def test_ask_returns_answer_sources_and_skips_private(make_client):
+    stub = StubAsk({"answer": "• Дюна 2 — хочу посмотреть", "used": [1]})
+    data = ask_post(make_client(StubLLM(), ask_llm=stub)).json()
+    assert data["status"] == "success" and data["answer"].startswith("• Дюна 2")
+    assert data["sources"] == ["Дюна 2"] and data["sources_text"] == "• Дюна 2"
+    assert data["private_skipped"] == 1 and data["notes_total"] == 3 and data["fallback"] is False
+    sent = "\n".join(stub.calls[0]["lines"])
+    assert "4321" not in sent and "Пароль" not in sent        # приватное до ИИ не доходит
+
+
+def test_ask_fallback_without_llm(make_client):
+    data = ask_post(make_client(StubLLM(), ask_llm=StubAsk(None))).json()
+    assert data["fallback"] is True and "Дюна 2" in data["answer"]
+
+
+def test_ask_validation_and_auth(make_client):
+    client = make_client(StubLLM(), ask_llm=StubAsk(None))
+    assert client.post("/ask", json={"question": "x", "corpus": CORPUS}).status_code == 401
+    assert ask_post(client, question="  ").status_code == 422
+    assert ask_post(client, question="а" * 1001).status_code == 413
+    assert client.post("/ask", content=b"{oops", headers=auth()).status_code == 422
+    big = make_client(StubLLM(), ask_llm=StubAsk(None), max_corpus_chars=100)
+    assert ask_post(big, corpus="ы" * 101).status_code == 413
+
+
+def test_digest_endpoint(make_client):
+    data = ask_post(make_client(StubLLM()), path="/digest").json()
+    assert data["status"] == "success"
+    assert "Просрочено:" in data["digest"] and "Позвонить Серику" in data["digest"]
+    assert "4321" not in data["digest"]
+
+
+def test_ask_and_digest_store_nothing(make_client, tmp_path):
+    client = make_client(StubLLM(), ask_llm=StubAsk({"answer": "ок", "used": []}))
+    ask_post(client)
+    ask_post(client, path="/digest")
+    conn = sqlite3.connect(tmp_path / "data" / "brain.db")
+    assert conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0] == 0
+    assert b"Duna" not in (tmp_path / "data" / "brain.db").read_bytes()

@@ -17,12 +17,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from . import ask as ask_module
 from . import links as links_module
 from . import llm as llm_module
 from .config import Settings, load_settings
 from .db import Database
 from .service import build_private_response, build_response
 from .textutil import find_urls, is_valid_capture_id, split_private
+from .vault import load_notes
 
 logger = logging.getLogger("second_brain")
 
@@ -38,6 +40,14 @@ class CaptureRequest(BaseModel):
     content: str = ""
     revision: int = 1
     user_clarifications: str = ""
+
+
+class AskRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    question: str = ""
+    corpus: str = ""
+    client: str = "ios"
 
 
 class RateLimiter:
@@ -65,10 +75,12 @@ def create_app(
     llm: Callable[..., Awaitable] | None = None,
     clock: Callable[[], datetime] | None = None,
     link_fetcher: Callable[..., Awaitable] | None = None,
+    ask_llm: Callable[..., Awaitable] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     llm = llm or llm_module.structure_capture
     link_fetcher = link_fetcher or links_module.fetch_link_info
+    ask_llm = ask_llm or ask_module.ask_llm
     clock = clock or (lambda: datetime.now(ZoneInfo(settings.timezone)))
 
     db = Database(settings.data_dir / "brain.db", ttl_hours=settings.response_ttl_hours)
@@ -169,5 +181,64 @@ def create_app(
         db.save(capture_id=capture_id, revision=payload.revision, response=response)
         # Если параллельный дубль успел записаться раньше — отдаём первый ответ
         return db.get(capture_id, payload.revision) or response
+
+    async def read_vault_request(request: Request, need_question: bool):
+        """Общая часть /ask и /digest. Возвращает (ответ-ошибка | None, запрос, заметки, число приватных)."""
+        provided = request.headers.get("x-api-key", "")
+        if not hmac.compare_digest(provided.encode("utf-8"), settings.capture_token.encode("utf-8")):
+            return _error(401, "Неверный или отсутствующий x-api-key"), None, None, 0
+        if not limiter.allow():
+            return _error(429, "Слишком много запросов, попробуйте через минуту"), None, None, 0
+        raw = await request.body()
+        if len(raw) > settings.max_corpus_chars * 3 + 4096:
+            return _error(413, "Слишком много заметок в одном запросе"), None, None, 0
+        try:
+            payload = AskRequest.model_validate(json.loads(raw))
+        except (ValueError, ValidationError):
+            return _error(422, "Тело запроса должно быть корректным JSON с полями question и corpus"), None, None, 0
+        if need_question:
+            question = payload.question.strip()
+            if not question:
+                return _error(422, "Поле question пустое"), None, None, 0
+            if len(question) > settings.max_question_chars:
+                return _error(413, f"Вопрос длиннее {settings.max_question_chars} символов"), None, None, 0
+            payload.question = question
+        if len(payload.corpus) > settings.max_corpus_chars:
+            return _error(413, "Слишком много заметок в одном запросе"), None, None, 0
+        notes, private = load_notes(payload.corpus)
+        return None, payload, notes, private
+
+    @app.post("/ask")
+    async def ask(request: Request):
+        error, payload, notes, private = await read_vault_request(request, need_question=True)
+        if error:
+            return error
+        now = clock()
+        result = await ask_module.answer_question(
+            settings, notes, payload.question, now,
+            llm=lambda cfg, **kw: ask_llm(cfg, **kw),
+        )
+        logger.info("ask notes=%d used=%d omitted=%d private=%d fallback=%s qchars=%d",
+                    len(notes), result.used_notes, result.omitted, private, result.fallback, len(payload.question))
+        return {
+            "status": "success",
+            "answer": result.answer,
+            "sources": result.sources,
+            "sources_text": "\n".join(f"• {title}" for title in result.sources),
+            "notes_total": len(notes) + private,
+            "notes_used": result.used_notes,
+            "notes_omitted": result.omitted,
+            "private_skipped": private,
+            "fallback": result.fallback,
+        }
+
+    @app.post("/digest")
+    async def digest(request: Request):
+        error, payload, notes, private = await read_vault_request(request, need_question=False)
+        if error:
+            return error
+        text = ask_module.build_digest(notes, clock())
+        logger.info("digest notes=%d private=%d", len(notes), private)
+        return {"status": "success", "digest": text, "notes_total": len(notes) + private}
 
     return app

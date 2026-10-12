@@ -85,13 +85,14 @@ def movie_result():
 
 @pytest.fixture
 def make_client(tmp_path):
-    def _make(llm=None, links=None, **overrides):
+    def _make(llm=None, links=None, ask_llm=None, **overrides):
         settings = make_settings(tmp_path, **overrides)
         app = create_app(
             settings=settings,
             llm=llm or StubLLM(None),
             clock=lambda: FIXED_NOW,
             link_fetcher=links or StubLinks(),
+            ask_llm=ask_llm,
         )
         return TestClient(app)
 
@@ -100,3 +101,30 @@ def make_client(tmp_path):
 
 def auth():
     return {"x-api-key": TOKEN}
+
+
+class StubAsk:
+    """Подменяет вызов DeepSeek для вопросов."""
+
+    def __init__(self, value=None):
+        self.value = value
+        self.calls = []
+
+    async def __call__(self, settings, **kwargs):
+        self.calls.append(kwargs)
+        return self.value
+
+
+def vault_note(title, *, type="note", body="", private=False, **front) -> str:
+    """Собирает текст заметки, как её хранит Obsidian."""
+    lines = ["---", "schema: 1", f'title: "{title}"', f'type: "{type}"']
+    for key, value in front.items():
+        if isinstance(value, list):
+            lines.append(f"{key}:")
+            lines += [f'  - "{item}"' for item in value]
+        else:
+            lines.append(f"{key}: {value}")
+    if private:
+        lines.append("private: true")
+    lines += ["---", "", body or title, ""]
+    return "\n".join(lines)

@@ -26,6 +26,9 @@ class Settings:
     max_notes: int = 10
     link_timeout: float = 5.0
     link_max_bytes: int = 200_000
+    max_corpus_chars: int = 3_000_000
+    ask_budget_chars: int = 80_000
+    max_question_chars: int = 1000
 
 
 def load_settings() -> Settings:
@@ -56,4 +59,6 @@ def load_settings() -> Settings:
         max_notes=int(os.environ.get("MAX_NOTES_PER_CAPTURE", "10")),
         link_timeout=float(os.environ.get("LINK_TIMEOUT_SECONDS", "5")),
         link_max_bytes=int(os.environ.get("LINK_MAX_BYTES", "200000")),
+        max_corpus_chars=int(os.environ.get("MAX_CORPUS_CHARS", "3000000")),
+        ask_budget_chars=int(os.environ.get("ASK_BUDGET_CHARS", "80000")),
     )
