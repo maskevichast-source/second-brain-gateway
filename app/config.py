@@ -30,6 +30,7 @@ class Settings:
     max_corpus_chars: int = 3_000_000
     ask_budget_chars: int = 80_000
     max_question_chars: int = 1000
+    max_context_chars: int = 8000
     telegram_secret: str = ""
     telegram_allowed_ids: frozenset = frozenset()
     outbox_ttl_days: float = 14.0

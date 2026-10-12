@@ -78,3 +78,30 @@ def test_odd_names_and_obsidian_style_yaml(tmp_path):
     })
     report = vp.run(vault, now=NOW)
     assert sorted(report["created"]) == ["Иван Петров мл", "Мария", "Нина", "Олег"]
+
+
+def test_build_profile_collects_context_and_people(tmp_path):
+    vault = make_vault(tmp_path, {
+        "Профиль.md": "---\ntitle: x\n---\n# Профиль\n<!-- подсказка -->\n## Семья\n- Диана — жена\n- …\n\n## Слова\n- УК — Damo Group\n",
+        "1-Люди/Серик.md": '---\ntitle: "Серик"\ntype: "person"\nrelation: "друг"\naliases:\n  - "Серёга"\n---\n# Серик\n',
+        "1-Люди/Аля.md": '---\ntitle: "Аля"\ntype: "person"\nrelation: []\n---\n',
+    })
+    payload = vp.build_profile(vault)
+    assert "Диана — жена" in payload["context"] and "подсказка" not in payload["context"] and "- …" not in payload["context"]
+    assert payload["people"] == [{"name": "Аля", "role": "", "aliases": []},
+                                 {"name": "Серик", "role": "друг", "aliases": ["Серёга"]}]
+    assert vp.build_profile(tmp_path / "нет")["context"] == ""
+
+
+def test_push_option_posts_profile(tmp_path, monkeypatch):
+    vault = make_vault(tmp_path, {"Профиль.md": "# П\nтекст\n"})
+    sent = {}
+
+    def fake_push(url, token, payload):
+        sent.update(url=url, token=token, payload=payload)
+        return {"people": 0, "context_chars": len(payload["context"])}
+
+    monkeypatch.setattr(vp, "push_profile", fake_push)
+    assert vp.main([str(vault), "--push", "https://x.example", "--token", "T"]) == 0
+    assert sent["url"] == "https://x.example" and sent["token"] == "T" and "текст" in sent["payload"]["context"]
+    assert vp.main([str(vault), "--push", "https://x.example", "--token", ""]) == 1

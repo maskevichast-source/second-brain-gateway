@@ -248,10 +248,12 @@ def test_database_holds_no_note_text_except_short_lived_response(make_client, ta
     post(make_client(StubLLM(task_result)))
     conn = sqlite3.connect(tmp_path / "data" / "brain.db")
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'") if not row[0].startswith("sqlite_")}
-    assert tables == {"responses", "outbox", "tg_pending"}
+    assert tables == {"responses", "outbox", "tg_pending", "tg_state", "profile", "known_people"}
     # очередь Telegram и ожидание уточнений при обычном /capture не используются
     assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM tg_pending").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM profile").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM known_people").fetchone()[0] == 0
 
 
 def test_expired_responses_are_purged(tmp_path):

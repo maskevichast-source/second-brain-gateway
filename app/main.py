@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import ask as ask_module
 from . import links as links_module
+from . import people as people_module
 from . import llm as llm_module
 from .config import Settings, load_settings
 from .db import Database
@@ -41,6 +42,23 @@ class CaptureRequest(BaseModel):
     content: str = ""
     revision: int = 1
     user_clarifications: str = ""
+    context: str | None = None            # необязательно: профиль из хранилища (перекрывает сохранённый на сервере)
+    known_people: list[dict] | None = None
+
+
+class PersonIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    role: str = ""
+    aliases: list[str] = []
+
+
+class ProfileIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    context: str | None = None
+    people: list[PersonIn] | None = None
 
 
 class AskRequest(BaseModel):
@@ -67,6 +85,29 @@ class RateLimiter:
         return True
 
 
+def clean_context(text: str | None, settings: Settings) -> str:
+    return (text or "").strip()[: settings.max_context_chars]
+
+
+def clean_people(items) -> list[dict]:
+    result, seen = [], set()
+    for item in items or []:
+        try:
+            person = PersonIn.model_validate(item if isinstance(item, dict) else {"name": str(item)})
+        except ValidationError:
+            continue
+        name = person.name.strip()[:80]
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        result.append({
+            "name": name,
+            "role": person.role.strip()[:80],
+            "aliases": [a.strip()[:60] for a in person.aliases if a.strip()][:8],
+        })
+    return result[:2000]
+
+
 def _error(status: int, detail: str) -> JSONResponse:
     return JSONResponse({"status": "error", "detail": detail}, status_code=status)
 
@@ -91,7 +132,10 @@ def create_app(
 
     app = FastAPI(title="Second Brain Gateway", docs_url=None, redoc_url=None, openapi_url=None)
 
-    async def process(*, capture_id: str, client: str, content: str, revision: int, clarifications: str) -> dict:
+    async def process(
+        *, capture_id: str, client: str, content: str, revision: int, clarifications: str,
+        context: str | None = None, known: list[dict] | None = None,
+    ) -> dict:
         """Превращает запись в заметки. Общая часть для /capture и Telegram."""
         # Режим «без ИИ»: текст никуда не уходит и не кэшируется
         private, private_text = split_private(content)
@@ -105,6 +149,10 @@ def create_app(
             return cached
 
         now = clock()
+        if context is None:
+            context = db.get_context()
+        if known is None:
+            known = db.known_people()
 
         # Названия по ссылкам, затем ИИ. Любой сбой даёт сохранение «как есть».
         urls = find_urls(content)
@@ -116,6 +164,8 @@ def create_app(
             clarifications=clarifications,
             revision=revision,
             now=now,
+            context=context,
+            people_text=people_module.describe_for_llm(known),
         )
 
         response = build_response(
@@ -129,6 +179,7 @@ def create_app(
             content_urls=urls,
             now=now,
             max_notes=settings.max_notes,
+            known_people=known,
         )
         logger.info(
             "capture id=%s rev=%d notes=%d types=%s fallback=%s chars=%d",
@@ -188,6 +239,8 @@ def create_app(
         return await process(
             capture_id=capture_id, client=payload.client, content=content,
             revision=payload.revision, clarifications=payload.user_clarifications,
+            context=clean_context(payload.context, settings) if payload.context is not None else None,
+            known=clean_people(payload.known_people) if payload.known_people is not None else None,
         )
 
     def authorized(request: Request) -> bool:
@@ -218,6 +271,36 @@ def create_app(
             return {}
         return reply or {}
 
+    @app.get("/profile")
+    async def profile_get(request: Request):
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        return {"status": "success", "context": db.get_context(), "people": db.known_people()}
+
+    @app.post("/profile")
+    async def profile_set(request: Request):
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        raw = await request.body()
+        if len(raw) > 600_000:
+            return _error(413, "Слишком большой запрос")
+        try:
+            payload = ProfileIn.model_validate(json.loads(raw))
+        except (ValueError, ValidationError):
+            return _error(422, "Тело запроса: {\"context\": \"текст\", \"people\": [{\"name\": \"Серик\", \"role\": \"друг\"}]}")
+        if payload.context is not None:
+            db.set_context(clean_context(payload.context, settings))
+        if payload.people is not None:
+            db.replace_people(clean_people([p.model_dump() for p in payload.people]))
+        return {"status": "success", "context_chars": len(db.get_context()), "people": len(db.known_people())}
+
+    @app.delete("/profile")
+    async def profile_delete(request: Request):
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        db.clear_profile()
+        return {"status": "success"}
+
     @app.get("/pending")
     async def pending(request: Request, limit: int = 50):
         if not authorized(request):
@@ -228,7 +311,8 @@ def create_app(
             "count": len(items),
             "remaining": db.pending_count(),
             "items": [
-                {"id": i["id"], "filename": i["filename"], "folder": i["folder"], "markdown": i["markdown"]}
+                {"id": i["id"], "filename": i["filename"], "folder": i["folder"], "markdown": i["markdown"],
+                 "reminders": json.loads(i["reminders"] or "[]")}
                 for i in items
             ],
         }

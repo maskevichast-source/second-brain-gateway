@@ -192,3 +192,128 @@ def test_settings_for_telegram(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "123, 456;789 abc")
     settings = load_settings()
     assert settings.telegram_secret == "a" * 20 and settings.telegram_allowed_ids == {123, 456, 789}
+
+
+# ---------- профиль, новые люди, интервью, напоминания ----------
+
+from .conftest import vault_note  # noqa: E402,F401
+
+
+def people_result(*names, **kw):
+    return result(note(type="task", title="Позвонить", body="позвонить", people=list(names), **kw))
+
+
+def test_new_person_triggers_question_and_card(tg):
+    llm = StubLLM(people_result("Серик"))
+    client = tg(llm)
+    first = send(client, update("позвонить Серику", uid=1)).json()["text"]
+    assert "Кто такой(ая) Серик?" in first and "/skip" in first
+    llm.value = result(note(type="person", title="Серик", body="друг", fields={"relation": "друг"}))
+    second = send(client, update("друг, работает в банке", uid=2)).json()["text"]
+    assert "Карточка: Серик" in second
+    assert "Данные о человеке по имени Серик" in llm.calls[1]["content"] and llm.calls[1]["revision"] == 2
+    people = client.get("/profile", headers=auth()).json()["people"]
+    assert people == [{"name": "Серик", "role": "друг", "aliases": []}]
+    # во второй раз про него уже не спрашивают
+    llm.value = people_result("Серик")
+    again = send(client, update("позвонить Серику ещё раз", uid=3)).json()["text"]
+    assert "Кто такой" not in again
+
+
+def test_known_people_are_sent_to_llm_and_canonicalised(tg):
+    llm = StubLLM(people_result("серику"))
+    client = tg(llm)
+    client.post("/profile", json={"context": "Диана — моя жена. УК — Damo Group.",
+                                  "people": [{"name": "Серик", "role": "друг", "aliases": ["серику", "Серёга"]}]}, headers=auth())
+    reply = send(client, update("позвонить Серику", uid=1)).json()["text"]
+    assert "Кто такой" not in reply
+    assert "Диана — моя жена" in llm.calls[0]["context"] and "Серик (друг" in llm.calls[0]["people_text"]
+    markdown = client.get("/pending", headers=auth()).json()["items"][0]["markdown"]
+    assert '"[[Серик]]"' in markdown
+
+
+def test_person_question_can_be_skipped_and_queue_continues(tg):
+    llm = StubLLM(people_result("Аля", "Борис"))
+    client = tg(llm)
+    first = send(client, update("позвонить Але и Борису", uid=1)).json()["text"]
+    assert "Кто такой(ая) Аля?" in first
+    assert "Кто такой(ая) Борис?" in send(client, update("/skip", uid=2)).json()["text"]
+    assert "пропустил Борис" in send(client, update("/skip", uid=3)).json()["text"]
+
+
+def test_new_thought_after_person_question_is_a_new_note(tg):
+    llm = StubLLM(people_result("Аля"))
+    client = tg(llm)
+    send(client, update("позвонить Але", uid=1))
+    llm.value = result(note(type="idea", title="Идея", body="идея"))
+    reply = send(client, update("идея: https://example.com/x очень интересно", uid=2)).json()["text"]
+    assert "Идея" in reply and len(llm.calls) == 2 and llm.calls[1]["content"].startswith("идея:")
+
+
+def test_interview_flow(tg):
+    from app import interview
+
+    llm = StubLLM(result(note(type="person", title="Диана", body="жена", fields={"relation": "жена"}, people=["Диана"])))
+    client = tg(llm)
+    start = send(client, update("/interview", uid=1)).json()["text"]
+    assert "Начинаем интервью" in start and "[1/" in start
+    second = send(client, update("Владислав, Астана, айти", uid=2)).json()["text"]
+    assert "Записал заметок: 1" in second and "[2/" in second
+    assert llm.calls[0]["revision"] == 2 and "Интервью, блок «Ты»" in llm.calls[0]["content"]
+    assert "[3/" in send(client, update("/skip", uid=3)).json()["text"]
+    assert send(client, update("/stop", uid=4)).json()["text"].startswith("Остановил")
+    llm.value = result(note(type="idea", title="Мысль", body="мысль"))
+    assert "Мысль" in send(client, update("просто мысль", uid=5)).json()["text"]      # на паузе это обычная запись
+    resumed = send(client, update("/interview", uid=6)).json()["text"]
+    assert "Продолжаем" in resumed and "[3/" in resumed
+    # люди из интервью запоминаются без лишних вопросов
+    assert any(p["name"] == "Диана" and p["role"] == "жена" for p in client.get("/profile", headers=auth()).json()["people"])
+    assert len(interview.QUESTIONS) >= 20
+
+
+def test_interview_private_answer_skips_llm(tg):
+    llm = StubLLM(result(note(body="x")))
+    client = tg(llm)
+    send(client, update("/interview", uid=1))
+    send(client, update("! только для меня", uid=2))
+    assert llm.calls == []
+    md = client.get("/pending", headers=auth()).json()["items"][0]["markdown"]
+    assert "только для меня" in md and "private: true" in md
+
+
+def test_reminders_are_built_from_note_fields_and_queued(tg):
+    task = result(note(type="task", status="открыто", title="Отправить бумаги", body="x",
+                       fields={"due": "2026-10-14"}),
+                  note(type="event", status="запланировано", title="Приём", body="y",
+                       fields={"event_at": "2026-10-15T10:00", "event_end": "2026-10-15T11:00"}),
+                  note(type="task", status="открыто", title="Просроченное", body="z", fields={"due": "2026-10-01"}))
+    client = tg(StubLLM(task))
+    reply = send(client, update("дела", uid=1)).json()["text"]
+    assert "Напоминаний и событий для iPhone: 2" in reply
+    items = client.get("/pending", headers=auth()).json()["items"]
+    reminders = [r for item in items for r in item["reminders"]]
+    assert {(r["kind"], r["date"], r["time"]) for r in reminders} == {("reminder", "2026-10-14", ""), ("event", "2026-10-15", "10:00")}
+    capture = client.post("/capture", json={"capture_id": "rem-test-0001", "content": "дела"}, headers=auth()).json()
+    assert capture["reminders_count"] == 2 and capture["reminders"][0]["title"] == "Отправить бумаги"
+
+
+def test_profile_endpoints(tg):
+    client = tg()
+    assert client.get("/profile").status_code == 401
+    assert client.post("/profile", json={"context": "ы" * 9000, "people": [{"name": "Серик"}, {"name": ""}, {"name": "Серик"}]},
+                       headers=auth()).json() == {"status": "success", "context_chars": 8000, "people": 1}
+    assert client.post("/profile", content=b"{oops", headers=auth()).status_code == 422
+    assert client.delete("/profile", headers=auth()).json()["status"] == "success"
+    assert client.get("/profile", headers=auth()).json() == {"status": "success", "context": "", "people": []}
+
+
+def test_capture_can_pass_context_and_people_statelessly(tg):
+    llm = StubLLM(people_result("Серик"))
+    client = tg(llm)
+    data = client.post("/capture", json={"capture_id": "ctx-test-0001", "content": "позвонить Серику",
+                                         "context": "Я живу в Астане", "known_people": [{"name": "Серик", "role": "друг"}]},
+                       headers=auth()).json()
+    assert data["new_people"] == [] and llm.calls[0]["context"] == "Я живу в Астане"
+    other = client.post("/capture", json={"capture_id": "ctx-test-0002", "content": "позвонить Серику"}, headers=auth()).json()
+    assert other["new_people"] == ["Серик"]            # без списка человек новый; сервер ничего сам не запоминает
+    assert client.get("/profile", headers=auth()).json()["people"] == []

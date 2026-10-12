@@ -3,14 +3,23 @@
 Сервер не может писать в iCloud, поэтому заметки ждут в очереди (`outbox`), пока их не заберёт
 ноутбук (tools/vault_sync.py) или телефон (шорткат). После подтверждения (`/ack`) они удаляются.
 Ответы боту отдаются прямо в ответе на webhook, поэтому токену бота на сервере делать нечего.
+
+Диалоги:
+- уточнение: ИИ не понял запись, спрашивает, следующий ответ уходит в ту же запись;
+- новый человек: упомянут незнакомый, бот спрашивает, кто это, ответ становится карточкой;
+- интервью (/interview): бот по очереди расспрашивает о тебе и окружении.
 """
 from __future__ import annotations
 
 import logging
+import re
 from typing import Awaitable, Callable
 
+from . import interview
 from .config import Settings
 from .db import Database
+from .textutil import split_private
+from .vault import parse_note
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +27,20 @@ HELP = (
     "Пришли мысль, ссылку или список дел, и я превращу это в заметку для Obsidian.\n\n"
     "• Начни сообщение с «!» или «секрет:», чтобы текст не уходил в ИИ.\n"
     "• Если я переспрошу, ответь одним сообщением или напиши /skip, чтобы сохранить как есть.\n"
-    "• /status — сколько заметок ждут выгрузки в хранилище.\n\n"
+    "• Если в записи новый человек, я спрошу, кто это.\n"
+    "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы.\n"
+    "• /people — кого я знаю. /status — сколько заметок ждут выгрузки.\n\n"
     "Голос и фото пока не принимаю: сначала преврати их в текст (на iPhone есть диктовка с клавиатуры)."
 )
 
 Processor = Callable[..., Awaitable[dict]]
+_URL = re.compile(r"https?://", re.I)
+
+
+def _wrap(text: str, wrapper) -> str:
+    """Добавляет контекст к ответу, но сохраняет режим «без ИИ»: ответ с «!» остаётся приватным."""
+    private, stripped = split_private(text)
+    return "! " + wrapper(stripped) if private else wrapper(text)
 
 
 def _reply(chat_id: int, text: str) -> dict:
@@ -40,7 +58,20 @@ def _summary(response: dict) -> str:
     if len(files) > 1:
         head = f"✅ Заметок: {len(files)}"
         head += "\n" + "\n".join(f"• {f['title']}" for f in files[:10])
+    count = response.get("reminders_count", 0)
+    if count:
+        head += f"\n⏰ Напоминаний и событий для iPhone: {count} (создам, когда телефон заберёт очередь)"
     return head + "\nВ хранилище появится, когда ноутбук или телефон заберёт очередь."
+
+
+def _learn_people(db: Database, response: dict) -> None:
+    """Люди из карточек, которые только что создались, попадают в список известных вместе с ролью."""
+    for f in response.get("files", []):
+        if f.get("type") != "person":
+            continue
+        note = parse_note(f["markdown"], 1)
+        role = str(note.get("relation") or note.get("relation_group") or "").strip()
+        db.upsert_person(note.title, role)
 
 
 async def handle_update(
@@ -78,6 +109,26 @@ async def handle_update(
     return reply
 
 
+async def _save(db: Database, process: Processor, *, capture_id: str, content: str, revision: int,
+                clarifications: str = "") -> dict:
+    response = await process(capture_id=capture_id, client="telegram", content=content,
+                             revision=revision, clarifications=clarifications)
+    if not response.get("needs_review") or revision != 1:
+        db.enqueue(capture_id, response["files"])
+        _learn_people(db, response)
+    return response
+
+
+def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str) -> str:
+    """Запоминает новых людей и возвращает текст вопроса про первого из них."""
+    for name in names:
+        db.upsert_person(name)               # чтобы не переспрашивать про того же человека снова
+    current, rest = names[0], names[1:4]
+    db.set_state(chat_id, "person", {"current": current, "rest": rest})
+    return (f"{prefix}\n\nКто такой(ая) {current}? Напиши роль и что знаешь (телефон, где работает, "
+            "день рождения) одним сообщением или /skip.")
+
+
 async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor) -> dict:
     text = (message.get("text") or message.get("caption") or "").strip()
     if not text:
@@ -88,6 +139,35 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
         return _reply(chat_id, HELP)
     if command == "/status":
         return _reply(chat_id, f"Ждут выгрузки в хранилище: {db.pending_count()}")
+    if command == "/people":
+        known = db.known_people()
+        if not known:
+            return _reply(chat_id, "Пока никого не знаю. Люди появятся из записей, интервью и профиля с ноутбука.")
+        rows = [f"• {p['name']}" + (f" — {p['role']}" if p["role"] else "") for p in known[:60]]
+        return _reply(chat_id, f"Знаю людей: {len(known)}\n" + "\n".join(rows))
+    if command == "/stop":
+        state = db.get_state(chat_id)
+        if state and state[0] == "interview":
+            db.set_state(chat_id, "interview", {**state[1], "paused": True})
+            return _reply(chat_id, "Остановил. /interview продолжит с того же места.")
+        db.clear_state(chat_id)
+        return _reply(chat_id, "Ок, остановил.")
+    if command == "/interview":
+        db.clear_waiting(chat_id)
+        return _interview_start(chat_id, db)
+
+    state = db.get_state(chat_id)
+    if state and state[0] == "interview" and state[1].get("paused"):
+        state = None                          # интервью на паузе: сообщения обрабатываются как обычные записи
+    # Ответ на вопрос про нового человека или интервью. Длинное сообщение или ссылка считаются новой записью.
+    if state and not (command == "" and (len(text) > 400 or _URL.search(text))) and command in ("", "/skip"):
+        kind, data = state
+        if kind == "interview":
+            return await _interview_step(chat_id, update_id, text, command, data, db, process, settings)
+        if kind == "person":
+            return await _person_step(chat_id, update_id, text, command, data, db, process, settings)
+    if state and command == "" and state[0] == "person":
+        db.clear_state(chat_id)               # ушёл в новую запись: вопрос про человека снимаем (интервью остаётся)
 
     waiting = db.get_waiting(chat_id)
     if command == "/skip":
@@ -104,15 +184,67 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
     if len(content) > settings.max_content_chars or len(clarifications) > settings.max_content_chars:
         return _reply(chat_id, f"Слишком длинно: максимум {settings.max_content_chars} символов.")
 
-    response = await process(
-        capture_id=capture_id, client="telegram", content=content,
-        revision=revision, clarifications=clarifications,
-    )
+    response = await _save(db, process, capture_id=capture_id, content=content, revision=revision,
+                           clarifications=clarifications)
     if revision == 2:
         db.clear_waiting(chat_id)
     if response.get("needs_review") and revision == 1:
         db.set_waiting(chat_id, capture_id, content)
         questions = "\n".join(f"• {q}" for q in response.get("review_questions", []))
         return _reply(chat_id, f"Нужно уточнение:\n{questions}\n\nОтветь одним сообщением или /skip.")
-    db.enqueue(capture_id, response["files"])
-    return _reply(chat_id, _summary(response))
+    summary = _summary(response)
+    new = [n for n in response.get("new_people", []) if not response.get("private")]
+    if new:
+        return _reply(chat_id, _ask_person(chat_id, db, new[:4], summary))
+    return _reply(chat_id, summary)
+
+
+# ---------- новый человек ----------
+
+async def _person_step(chat_id, update_id, text, command, data, db, process, settings) -> dict:
+    current, rest = data["current"], data.get("rest", [])
+    prefix = ""
+    if command != "/skip":
+        content = _wrap(text, lambda t: f"Данные о человеке по имени {current} (карточка нового знакомого, тип person): {t}")
+        response = await _save(db, process, capture_id=f"tgp-{update_id}", content=content, revision=2)
+        prefix = f"✅ Карточка: {current}"
+        if response.get("private"):
+            prefix = f"🔒 {current}: сохранил без ИИ"
+    else:
+        prefix = f"Ок, пропустил {current}."
+    if rest:
+        return _reply(chat_id, _ask_person(chat_id, db, rest, prefix))
+    db.clear_state(chat_id)
+    return _reply(chat_id, prefix)
+
+
+# ---------- интервью ----------
+
+def _interview_start(chat_id: int, db: Database) -> dict:
+    state = db.get_state(chat_id)
+    index = state[1].get("i", 0) if state and state[0] == "interview" else 0
+    if index >= len(interview.QUESTIONS):
+        index = 0
+    db.set_state(chat_id, "interview", {"i": index, "saved": state[1].get("saved", 0) if state and state[0] == "interview" else 0})
+    intro = interview.INTRO if index == 0 else "Продолжаем интервью."
+    return _reply(chat_id, f"{intro}\n\n{interview.question_text(index)}")
+
+
+async def _interview_step(chat_id, update_id, text, command, data, db, process, settings) -> dict:
+    index, saved = int(data.get("i", 0)), int(data.get("saved", 0))
+    note = ""
+    if command != "/skip":
+        content = _wrap(text, lambda t: interview.answer_as_content(index, t))
+        if len(content) > settings.max_content_chars:
+            return _reply(chat_id, f"Слишком длинно: максимум {settings.max_content_chars} символов. Раздели на части.")
+        response = await _save(db, process, capture_id=f"tgi-{update_id}", content=content, revision=2)
+        saved += response.get("count", 0)
+        note = f"✅ Записал заметок: {response.get('count', 0)}. "
+    index += 1
+    if index >= len(interview.QUESTIONS):
+        db.clear_state(chat_id)
+        return _reply(chat_id, f"{note}Интервью закончено. Всего заметок: {saved}. "
+                               "Когда ноутбук или телефон заберёт очередь, они появятся в хранилище. "
+                               "Потом заполни файл «Профиль» и отправь его на сервер скриптом, чтобы я знал контекст.")
+    db.set_state(chat_id, "interview", {"i": index, "saved": saved})
+    return _reply(chat_id, f"{note}\n{interview.question_text(index)}")

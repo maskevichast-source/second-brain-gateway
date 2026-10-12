@@ -35,7 +35,25 @@ CREATE TABLE IF NOT EXISTS outbox (
     folder      TEXT NOT NULL,
     markdown    TEXT NOT NULL,
     created_at  TEXT NOT NULL,
+    reminders   TEXT NOT NULL DEFAULT '[]',
     UNIQUE (capture_id, filename)
+);
+CREATE TABLE IF NOT EXISTS profile (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS known_people (
+    name       TEXT PRIMARY KEY,
+    role       TEXT NOT NULL DEFAULT '',
+    aliases    TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tg_state (
+    chat_id    INTEGER PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tg_pending (
     chat_id    INTEGER PRIMARY KEY,
@@ -63,6 +81,9 @@ class Database:
             self._drop_legacy(conn)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(outbox)")}
+            if "reminders" not in columns:                       # база создана версией до напоминаний
+                conn.execute("ALTER TABLE outbox ADD COLUMN reminders TEXT NOT NULL DEFAULT '[]'")
             conn.commit()
         self.purge_expired(vacuum=True)
 
@@ -82,6 +103,8 @@ class Database:
         with closing(self._connect()) as conn:
             removed = conn.execute("DELETE FROM responses WHERE created_at < ?", (cutoff,)).rowcount
             removed += conn.execute("DELETE FROM tg_pending WHERE created_at < ?", (cutoff,)).rowcount
+            state_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+            removed += conn.execute("DELETE FROM tg_state WHERE created_at < ?", (state_cutoff,)).rowcount
             outbox_cutoff = (datetime.now(timezone.utc) - self.outbox_ttl).isoformat(timespec="seconds")
             removed += conn.execute("DELETE FROM outbox WHERE created_at < ?", (outbox_cutoff,)).rowcount
             conn.commit()
@@ -124,9 +147,10 @@ class Database:
         with closing(self._connect()) as conn:
             for f in files:
                 added += conn.execute(
-                    "INSERT OR IGNORE INTO outbox (capture_id, filename, folder, markdown, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (capture_id, f["filename"], f["folder"], f["markdown"], now),
+                    "INSERT OR IGNORE INTO outbox (capture_id, filename, folder, markdown, created_at, reminders) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (capture_id, f["filename"], f["folder"], f["markdown"], now,
+                     json.dumps(f.get("reminders", []), ensure_ascii=False)),
                 ).rowcount
             conn.commit()
         return added
@@ -134,7 +158,7 @@ class Database:
     def pending(self, limit: int = 50) -> list[dict]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                "SELECT id, capture_id, filename, folder, markdown, created_at FROM outbox ORDER BY id LIMIT ?",
+                "SELECT id, capture_id, filename, folder, markdown, created_at, reminders FROM outbox ORDER BY id LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -179,4 +203,76 @@ class Database:
     def clear_waiting(self, chat_id: int) -> None:
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM tg_pending WHERE chat_id = ?", (chat_id,))
+            conn.commit()
+
+    # ---------- профиль и известные люди (постоянно, но только имена, роли и короткий контекст) ----------
+
+    def set_context(self, text: str) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO profile (key, value, updated_at) VALUES ('context', ?, ?)",
+                (text, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+            conn.commit()
+
+    def get_context(self) -> str:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT value FROM profile WHERE key = 'context'").fetchone()
+        return row["value"] if row else ""
+
+    def known_people(self) -> list[dict]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT name, role, aliases FROM known_people ORDER BY name").fetchall()
+        return [{"name": r["name"], "role": r["role"], "aliases": json.loads(r["aliases"])} for r in rows]
+
+    def replace_people(self, people: list[dict]) -> None:
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM known_people")
+            for p in people:
+                conn.execute(
+                    "INSERT OR REPLACE INTO known_people (name, role, aliases, updated_at) VALUES (?, ?, ?, ?)",
+                    (p["name"], p.get("role", ""), json.dumps(p.get("aliases", []), ensure_ascii=False), stamp),
+                )
+            conn.commit()
+
+    def upsert_person(self, name: str, role: str = "") -> None:
+        """Добавляет человека; уже известной роли пустой не затирает."""
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT INTO known_people (name, role, aliases, updated_at) VALUES (?, ?, '[]', ?) "
+                "ON CONFLICT(name) DO UPDATE SET role = CASE WHEN excluded.role != '' THEN excluded.role ELSE role END, "
+                "updated_at = excluded.updated_at",
+                (name, role, stamp),
+            )
+            conn.commit()
+
+    def clear_profile(self) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM profile")
+            conn.execute("DELETE FROM known_people")
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("VACUUM")
+
+    # ---------- состояние диалога в Telegram (новый человек, интервью) ----------
+
+    def set_state(self, chat_id: int, kind: str, data: dict) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO tg_state (chat_id, kind, data, created_at) VALUES (?, ?, ?, ?)",
+                (chat_id, kind, json.dumps(data, ensure_ascii=False),
+                 datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+            conn.commit()
+
+    def get_state(self, chat_id: int) -> tuple[str, dict] | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT kind, data FROM tg_state WHERE chat_id = ?", (chat_id,)).fetchone()
+        return (row["kind"], json.loads(row["data"])) if row else None
+
+    def clear_state(self, chat_id: int) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM tg_state WHERE chat_id = ?", (chat_id,))
             conn.commit()

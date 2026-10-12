@@ -13,6 +13,8 @@ from .frontmatter import Raw, dump
 from .links import LinkInfo
 from .llm import LLMNote, LLMResult
 from .schema import Field
+from . import people as people_module
+from . import reminders as reminders_module
 from .textutil import (
     clean_tags,
     file_suffix,
@@ -272,12 +274,23 @@ def build_response(
     content_urls: list[str],
     now: datetime,
     max_notes: int = 10,
+    known_people: list[dict] | None = None,
 ) -> dict:
     content = content.strip()
     clarifications = clarifications.strip()
     link_map = {info.url: info for info in links}
     fallback = result is None
     raw_notes = _fallback_notes(content, links) if fallback else list(result.notes)
+
+    # имена людей приводим к каноническим (по списку известных) и находим новых
+    index = people_module.build_index(known_people or [])
+    new_people: list[str] = []
+    for i, raw in enumerate(raw_notes):
+        names = [people_module.canonical(n, index) for n in raw.people]
+        raw_notes[i] = raw.model_copy(update={"people": names})
+        for name in names:
+            if people_module.is_new(name, index) and name not in new_people:
+                new_people.append(name)
 
     overflow = len(raw_notes) > max_notes
     raw_notes = raw_notes[:max_notes]
@@ -318,12 +331,16 @@ def build_response(
         questions = [q.strip() for q in result.review_questions if q.strip()][:2] or [DEFAULT_QUESTION]
 
     files = _assemble(notes, capture_id, now)
+    reminders = reminders_module.for_files(files, now)
     first = files[0]
     return {
         "status": "success",
         "schema": schema.SCHEMA_VERSION,
         "capture_id": capture_id,
         "revision": revision,
+        "new_people": [] if fallback else new_people,
+        "reminders": reminders,
+        "reminders_count": len(reminders),
         "needs_review": needs_review,
         "needs_review_flag": "yes" if needs_review else "no",
         "review_questions": questions,
@@ -360,6 +377,9 @@ def build_private_response(*, capture_id: str, client: str, text: str, now: date
         "review_text": "",
         "fallback": False,
         "private": True,
+        "new_people": [],
+        "reminders": [],
+        "reminders_count": 0,
         "count": 1,
         "message": "Сохранено без ИИ",
         "files": files,

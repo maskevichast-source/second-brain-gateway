@@ -11,13 +11,16 @@
 Только стандартная библиотека Python 3.9+. Запуск:
     python vault_people.py "C:\\путь\\к\\SecondBrain"            # создать и обновить
     python vault_people.py "C:\\путь\\к\\SecondBrain" --dry-run   # только показать, что будет
+    python vault_people.py "C:\\путь\\к\\SecondBrain" --push https://ТВОЙ-АДРЕС   # ещё и отправить профиль и имена людей на сервер
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -278,10 +281,47 @@ def run(vault: Path, dry_run: bool = False, now: datetime | None = None) -> dict
     return report
 
 
+def build_profile(vault: Path) -> dict:
+    """Собирает то, что уходит на сервер: текст файла «Профиль.md» и список людей (имя, роль, псевдонимы)."""
+    context = ""
+    profile = vault / "Профиль.md"
+    if profile.exists():
+        text = profile.read_text(encoding="utf-8").replace("\r\n", "\n")
+        parts = split_front(text)
+        if parts:
+            text = parts[1]
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        lines = [ln.rstrip() for ln in text.splitlines() if ln.strip() not in ("", "-", "- …", "…")]
+        context = "\n".join(lines).strip()
+    people = []
+    folder = vault / PEOPLE_DIR
+    if folder.is_dir():
+        for path in sorted(folder.glob("*.md")):
+            parts = split_front(path.read_text(encoding="utf-8"))
+            front = parse_front(parts[0]) if parts else {}
+            role = str(front.get("relation") or front.get("relation_group") or "").strip()
+            if role == "[]":
+                role = ""
+            people.append({"name": str(front.get("title") or path.stem).strip() or path.stem,
+                           "role": role, "aliases": as_list(front.get("aliases"))})
+    return {"context": context, "people": people}
+
+
+def push_profile(url: str, token: str, payload: dict) -> dict:
+    request = urllib.request.Request(
+        url.rstrip("/") + "/profile", data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
+        headers={"x-api-key": token, "content-type": "application/json; charset=utf-8"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Создать и обновить карточки людей в хранилище.")
     parser.add_argument("vault", help="папка хранилища SecondBrain")
     parser.add_argument("--dry-run", action="store_true", help="ничего не писать, только показать")
+    parser.add_argument("--push", metavar="URL", help="после обновления отправить профиль и список людей на сервер")
+    parser.add_argument("--token", default=os.environ.get("SECOND_BRAIN_TOKEN", ""))
     args = parser.parse_args(argv)
     vault = Path(args.vault)
     if not vault.is_dir():
@@ -294,6 +334,15 @@ def main(argv=None) -> int:
         print(f"  + {name}")
     for line in report["updated"]:
         print(f"  ~ {line}")
+    if args.push and not args.dry_run:
+        if not args.token:
+            print("Для --push нужен токен: переменная SECOND_BRAIN_TOKEN или параметр --token")
+            return 1
+        payload = build_profile(vault)
+        if len(payload["context"]) > 8000:
+            print("Профиль длиннее 8000 символов: сервер возьмёт только начало. Сократи файл «Профиль.md».")
+        answer = push_profile(args.push, args.token, payload)
+        print(f"Отправлено на сервер: людей {answer.get('people')}, символов профиля {answer.get('context_chars')}")
     return 0
 
 
