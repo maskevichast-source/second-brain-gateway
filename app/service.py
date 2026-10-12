@@ -311,8 +311,8 @@ def build_response(
         )
         notes.append(rest)
 
-    # вопросы: только для первой ревизии и не для одиночной ссылки
-    needs_review = bool(result and result.needs_review and revision == 1 and not single_url(content))
+    # вопросы: только для первой ревизии и не для записей со ссылками (ссылки и пересланное понятны без вопросов)
+    needs_review = bool(result and result.needs_review and revision == 1 and not content_urls and not single_url(content))
     questions: list[str] = []
     if needs_review:
         questions = [q.strip() for q in result.review_questions if q.strip()][:2] or [DEFAULT_QUESTION]

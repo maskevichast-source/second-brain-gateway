@@ -345,3 +345,9 @@ def test_ask_and_digest_store_nothing(make_client, tmp_path):
     conn = sqlite3.connect(tmp_path / "data" / "brain.db")
     assert conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0] == 0
     assert b"Duna" not in (tmp_path / "data" / "brain.db").read_bytes()
+
+
+def test_links_never_trigger_questions_even_if_model_asks(make_client):
+    asking = result(note(type="bookmark", title="Ролик", body="x"), needs_review=True, questions=["Что с этим сделать?"])
+    data = post(make_client(StubLLM(asking)), content="глянуть потом https://youtu.be/7BfIXbGp8q4 пригодится").json()
+    assert data["needs_review"] is False and data["needs_review_flag"] == "no" and data["review_questions"] == []
