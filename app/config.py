@@ -37,6 +37,7 @@ class Settings:
     ada_summary_url: str = ""
     ada_summary_token: str = ""
     ada_timeout: float = 8.0
+    snapshot_max_rows: int = 20000
 
 
 def load_settings() -> Settings:

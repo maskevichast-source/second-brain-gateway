@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from . import ada as ada_module
 from . import ask as ask_module
 from . import review as review_module
+from . import snapshot as snapshot_module
 from . import links as links_module
 from . import people as people_module
 from . import llm as llm_module
@@ -192,6 +193,9 @@ def create_app(
         )
 
         db.save(capture_id=capture_id, revision=revision, response=response)
+        if not response.get("needs_review") or revision != 1:
+            for f in response.get("files", []):
+                db.snapshot_put(snapshot_module.rows_from_markdown(f["markdown"]), settings.snapshot_max_rows)
         # Если параллельный дубль успел записаться раньше — отдаём первый ответ
         return db.get(capture_id, revision) or response
 
@@ -264,7 +268,7 @@ def create_app(
         except ValueError:
             return {}
         try:
-            reply = await handle_update(update, settings=settings, db=db, process=process)
+            reply = await handle_update(update, settings=settings, db=db, process=process, secretary=secretary)
         except Exception as exc:  # noqa: BLE001 — Telegram не должен засыпать нас повторами
             logger.error("telegram: ошибка обработки (%s)", type(exc).__name__)
             message = update.get("message") if isinstance(update, dict) else None
@@ -357,6 +361,8 @@ def create_app(
             payload.question = question
         if len(payload.corpus) > settings.max_corpus_chars:
             return _error(413, "Слишком много заметок в одном запросе"), None, None, 0
+        if not payload.corpus.strip():          # присылать заметки не обязательно: берём срез на сервере
+            return None, payload, snapshot_module.to_notes(db.snapshot_fronts()), 0
         notes, private = load_notes(payload.corpus)
         return None, payload, notes, private
 
@@ -411,6 +417,58 @@ def create_app(
         text = review_module.build_brief(notes, payload.person[:100], clock(), ada_text)
         logger.info("brief notes=%d private=%d", len(notes), private)
         return {"status": "success", "brief": text, "notes_total": len(notes) + private}
+
+    @app.post("/snapshot")
+    async def snapshot_sync(request: Request):
+        """Полная синхронизация: заменяет срез заметками из хранилища (шорткат «Синхронизировать»)."""
+        error, payload, notes, private = await read_vault_request(request, need_question=False)
+        if error:
+            return error
+        if not payload.corpus.strip():
+            return _error(422, "Поле corpus пустое: нечего синхронизировать")
+        rows = [r for n in notes if (r := snapshot_module.row_from_note(n))]
+        for item in db.pending():                       # ещё не выгруженное из Telegram остаётся в срезе
+            rows += snapshot_module.rows_from_markdown(item["markdown"])
+        db.snapshot_replace(rows, settings.snapshot_max_rows)
+        count, _ = db.snapshot_info()
+        logger.info("snapshot sync notes=%d private=%d stored=%d", len(notes), private, count)
+        return {"status": "success", "stored": count, "private_skipped": private}
+
+    @app.get("/snapshot")
+    async def snapshot_info(request: Request):
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        count, synced = db.snapshot_info()
+        return {"status": "success", "notes": count, "last_full_sync": synced}
+
+    @app.delete("/snapshot")
+    async def snapshot_delete(request: Request):
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        return {"status": "success", "removed": db.snapshot_clear()}
+
+    async def secretary(kind: str, arg: str) -> str:
+        """Ответы для Telegram по срезу на сервере."""
+        now = clock()
+        ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
+        if kind == "budget":
+            return ada_text or "Финансы «Ады» не подключены (см. README, часть 7)."
+        notes = snapshot_module.to_notes(db.snapshot_fronts())
+        if not notes:
+            return ("Срез хранилища пуст. Запиши что-нибудь через бота или запусти на iPhone шорткат "
+                    "«Синхронизировать» (README, часть 8).")
+        if kind == "day":
+            return ask_module.build_digest(notes, now, ada_brief=ada_text)
+        if kind == "week":
+            return review_module.build_week_review(notes, now, ada_text)
+        if kind == "brief":
+            return review_module.build_brief(notes, arg, now, ada_text)
+        result = await ask_module.answer_question(
+            settings, notes, arg, now, llm=lambda cfg, **kw: ask_llm(cfg, **kw), ada_text=ada_text)
+        text = result.answer
+        if result.sources:
+            text += "\n\nИсточники:\n" + "\n".join(f"• {t}" for t in result.sources[:8])
+        return text
 
     @app.get("/finance")
     async def finance(request: Request):

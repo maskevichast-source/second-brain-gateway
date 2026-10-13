@@ -29,7 +29,9 @@ HELP = (
     "• Если я переспрошу, ответь одним сообщением или напиши /skip, чтобы сохранить как есть.\n"
     "• Если в записи новый человек, я спрошу, кто это.\n"
     "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки.\n"
-    "• /people — кого я знаю. /status — сколько заметок ждут выгрузки.\n\n"
+    "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
+    "/brief Имя — что знать перед встречей, /budget — бюджет из «Ады».\n"
+    "• /people — кого я знаю. /status — сколько заметок ждут выгрузки. /sync — состояние среза, /forget — стереть срез.\n\n"
     "Голос и фото пока не принимаю: сначала преврати их в текст (на iPhone есть диктовка с клавиатуры)."
 )
 
@@ -75,7 +77,7 @@ def _learn_people(db: Database, response: dict) -> None:
 
 
 async def handle_update(
-    update: dict, *, settings: Settings, db: Database, process: Processor,
+    update: dict, *, settings: Settings, db: Database, process: Processor, secretary=None,
 ) -> dict | None:
     """Возвращает ответ для Telegram (метод sendMessage) или None, если отвечать не нужно."""
     message = update.get("message")
@@ -103,7 +105,7 @@ async def handle_update(
         if cached:
             return cached
 
-    reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process)
+    reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process, secretary=secretary)
     if dedupe_key and reply:
         db.save(capture_id=dedupe_key, revision=1, response=reply)
     return reply
@@ -129,7 +131,8 @@ def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str) -> st
             "день рождения) одним сообщением или /skip.")
 
 
-async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor) -> dict:
+async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
+                  secretary=None) -> dict:
     text = (message.get("text") or message.get("caption") or "").strip()
     if not text:
         return _reply(chat_id, "Пока принимаю только текст и ссылки. " + HELP.split("\n\n")[-1])
@@ -137,6 +140,23 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
     command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
     if command in ("/start", "/help"):
         return _reply(chat_id, HELP)
+    if command in ("/ask", "/day", "/week", "/brief", "/budget"):
+        arg = text[len(text.split()[0]):].strip()
+        if secretary is None:
+            return _reply(chat_id, "Эта команда пока недоступна.")
+        if command == "/ask" and not arg:
+            return _reply(chat_id, "Напиши вопрос после команды, например: /ask что я обещал Серику?")
+        if command == "/brief" and not arg:
+            return _reply(chat_id, "С кем встреча? Например: /brief Серик")
+        return _reply(chat_id, await secretary(command[1:], arg[:1000]))
+    if command == "/forget":
+        removed = db.snapshot_clear()
+        return _reply(chat_id, f"Стёр срез хранилища на сервере ({removed} записей). Новые записи снова попадут в него; "
+                               "полную копию вернёт шорткат «Синхронизировать».")
+    if command == "/sync":
+        count, synced = db.snapshot_info()
+        when = f"последняя полная синхронизация: {synced[:16].replace('T', ' ')} UTC" if synced else "полной синхронизации ещё не было"
+        return _reply(chat_id, f"В срезе заметок: {count}; {when}.")
     if command == "/status":
         return _reply(chat_id, f"Ждут выгрузки в хранилище: {db.pending_count()}")
     if command == "/people":

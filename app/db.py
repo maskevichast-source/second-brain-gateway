@@ -55,6 +55,11 @@ CREATE TABLE IF NOT EXISTS tg_state (
     data       TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS snapshot (
+    key        TEXT PRIMARY KEY,
+    front      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tg_pending (
     chat_id    INTEGER PRIMARY KEY,
     capture_id TEXT NOT NULL,
@@ -205,6 +210,48 @@ class Database:
             conn.execute("DELETE FROM tg_pending WHERE chat_id = ?", (chat_id,))
             conn.commit()
 
+    # ---------- срез хранилища (короткие свойства заметок, без текстов) ----------
+
+    def snapshot_put(self, rows: list[tuple[str, dict]], max_rows: int = 20000) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            for key, front in rows:
+                conn.execute("INSERT OR REPLACE INTO snapshot (key, front, updated_at) VALUES (?, ?, ?)",
+                             (key, json.dumps(front, ensure_ascii=False), now))
+            conn.execute(
+                "DELETE FROM snapshot WHERE key IN (SELECT key FROM snapshot ORDER BY updated_at DESC LIMIT -1 OFFSET ?)",
+                (max_rows,))
+            conn.commit()
+
+    def snapshot_replace(self, rows: list[tuple[str, dict]], max_rows: int = 20000) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM snapshot")
+            conn.execute(
+                "INSERT OR REPLACE INTO profile (key, value, updated_at) VALUES ('snapshot_synced', ?, ?)",
+                ("1", datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            conn.commit()
+        self.snapshot_put(rows[:max_rows], max_rows)
+
+    def snapshot_fronts(self) -> list[dict]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT front FROM snapshot ORDER BY updated_at, key").fetchall()
+        return [json.loads(row["front"]) for row in rows]
+
+    def snapshot_info(self) -> tuple[int, str]:
+        with closing(self._connect()) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM snapshot").fetchone()[0]
+            row = conn.execute("SELECT updated_at FROM profile WHERE key = 'snapshot_synced'").fetchone()
+        return count, (row["updated_at"] if row else "")
+
+    def snapshot_clear(self) -> int:
+        with closing(self._connect()) as conn:
+            count = conn.execute("DELETE FROM snapshot").rowcount
+            conn.execute("DELETE FROM profile WHERE key = 'snapshot_synced'")
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("VACUUM")
+        return count
+
     # ---------- профиль и известные люди (постоянно, но только имена, роли и короткий контекст) ----------
 
     def set_context(self, text: str) -> None:
@@ -250,7 +297,7 @@ class Database:
 
     def clear_profile(self) -> None:
         with closing(self._connect()) as conn:
-            conn.execute("DELETE FROM profile")
+            conn.execute("DELETE FROM profile WHERE key != 'snapshot_synced'")
             conn.execute("DELETE FROM known_people")
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
