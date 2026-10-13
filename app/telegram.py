@@ -28,7 +28,7 @@ HELP = (
     "• Начни сообщение с «!» или «секрет:», чтобы текст не уходил в ИИ.\n"
     "• Если я переспрошу, ответь одним сообщением или напиши /skip, чтобы сохранить как есть.\n"
     "• Если в записи новый человек, я спрошу, кто это.\n"
-    "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы.\n"
+    "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки.\n"
     "• /people — кого я знаю. /status — сколько заметок ждут выгрузки.\n\n"
     "Голос и фото пока не принимаю: сначала преврати их в текст (на iPhone есть диктовка с клавиатуры)."
 )
@@ -154,7 +154,7 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
         return _reply(chat_id, "Ок, остановил.")
     if command == "/interview":
         db.clear_waiting(chat_id)
-        return _interview_start(chat_id, db)
+        return _interview_start(chat_id, db, " ".join(text.split()[1:]))
 
     state = db.get_state(chat_id)
     if state and state[0] == "interview" and state[1].get("paused"):
@@ -220,18 +220,43 @@ async def _person_step(chat_id, update_id, text, command, data, db, process, set
 
 # ---------- интервью ----------
 
-def _interview_start(chat_id: int, db: Database) -> dict:
+def _queue(data: dict) -> list[int]:
+    queue = data.get("queue")
+    if isinstance(queue, list) and queue and all(isinstance(i, int) and 0 <= i < len(interview.QUESTIONS) for i in queue):
+        return queue
+    return list(range(len(interview.QUESTIONS)))
+
+
+def _interview_start(chat_id: int, db: Database, arg: str = "") -> dict:
     state = db.get_state(chat_id)
-    index = state[1].get("i", 0) if state and state[0] == "interview" else 0
-    if index >= len(interview.QUESTIONS):
-        index = 0
-    db.set_state(chat_id, "interview", {"i": index, "saved": state[1].get("saved", 0) if state and state[0] == "interview" else 0})
-    intro = interview.INTRO if index == 0 else "Продолжаем интервью."
-    return _reply(chat_id, f"{intro}\n\n{interview.question_text(index)}")
+    old = state[1] if state and state[0] == "interview" else {}
+    arg = arg.strip().lower()
+    if arg in ("блоки", "темы", "список"):
+        return _reply(chat_id, interview.blocks_text())
+    if arg:
+        if arg in ("все", "всё", "заново", "сначала"):
+            data = {"i": 0, "saved": old.get("saved", 0)}
+        else:
+            block = interview.find_block(arg)
+            if not block:
+                return _reply(chat_id, "Не знаю такого блока.\n\n" + interview.blocks_text())
+            data = {"i": 0, "saved": old.get("saved", 0), "queue": interview.block_indices(block)}
+    else:
+        data = dict(old) if old else {"i": 0, "saved": 0}
+    queue = _queue(data)
+    position = int(data.get("i", 0))
+    if position >= len(queue):
+        position = 0
+    data.update({"i": position, "paused": False})
+    db.set_state(chat_id, "interview", data)
+    intro = interview.INTRO.format(total=len(queue)) if position == 0 else "Продолжаем интервью."
+    return _reply(chat_id, f"{intro}\n\n{interview.question_text(queue[position], position, len(queue))}")
 
 
 async def _interview_step(chat_id, update_id, text, command, data, db, process, settings) -> dict:
-    index, saved = int(data.get("i", 0)), int(data.get("saved", 0))
+    queue = _queue(data)
+    position, saved = int(data.get("i", 0)), int(data.get("saved", 0))
+    index = queue[min(position, len(queue) - 1)]
     note = ""
     if command != "/skip":
         content = _wrap(text, lambda t: interview.answer_as_content(index, t))
@@ -240,11 +265,15 @@ async def _interview_step(chat_id, update_id, text, command, data, db, process, 
         response = await _save(db, process, capture_id=f"tgi-{update_id}", content=content, revision=2)
         saved += response.get("count", 0)
         note = f"✅ Записал заметок: {response.get('count', 0)}. "
-    index += 1
-    if index >= len(interview.QUESTIONS):
+    position += 1
+    if position >= len(queue):
         db.clear_state(chat_id)
         return _reply(chat_id, f"{note}Интервью закончено. Всего заметок: {saved}. "
                                "Когда ноутбук или телефон заберёт очередь, они появятся в хранилище. "
-                               "Потом заполни файл «Профиль» и отправь его на сервер скриптом, чтобы я знал контекст.")
-    db.set_state(chat_id, "interview", {"i": index, "saved": saved})
-    return _reply(chat_id, f"{note}\n{interview.question_text(index)}")
+                               "Другие блоки: /interview блоки. Потом заполни файл «Профиль» и отправь его на сервер "
+                               "скриптом, чтобы я знал контекст.")
+    new = {"i": position, "saved": saved}
+    if "queue" in data:
+        new["queue"] = queue
+    db.set_state(chat_id, "interview", new)
+    return _reply(chat_id, f"{note}\n{interview.question_text(queue[position], position, len(queue))}")

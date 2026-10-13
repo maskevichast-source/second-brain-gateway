@@ -317,3 +317,36 @@ def test_capture_can_pass_context_and_people_statelessly(tg):
     other = client.post("/capture", json={"capture_id": "ctx-test-0002", "content": "позвонить Серику"}, headers=auth()).json()
     assert other["new_people"] == ["Серик"]            # без списка человек новый; сервер ничего сам не запоминает
     assert client.get("/profile", headers=auth()).json()["people"] == []
+
+
+def test_interview_blocks_and_single_block(tg):
+    from app import interview
+
+    assert len(interview.QUESTIONS) >= 60
+    llm = StubLLM(result(note(type="note", title="Дом", body="x")))
+    client = tg(llm)
+    listing = send(client, update("/interview блоки", uid=1)).json()["text"]
+    assert "Дом —" in listing and "Документы —" in listing
+    assert "Не знаю такого блока" in send(client, update("/interview абвгд", uid=2)).json()["text"]
+    start = send(client, update("/interview дом", uid=3)).json()["text"]
+    total = len(interview.block_indices("Дом"))
+    assert f"[1/{total}] Дом" in start and f"около {total}" in start
+    nxt = send(client, update("ЖК Нурлы", uid=4)).json()["text"]
+    assert f"[2/{total}] Дом" in nxt
+    for uid in range(5, 5 + total - 2):
+        send(client, update("/skip", uid=uid))
+    done = send(client, update("/skip", uid=100)).json()["text"]
+    assert "Интервью закончено" in done
+    # после конца блока обычные сообщения снова записываются как заметки
+    assert "[" not in send(client, update("просто текст", uid=101)).json()["text"][:2]
+
+
+def test_interview_block_survives_pause(tg):
+    from app import interview
+
+    client = tg(StubLLM(result(note(body="x"))))
+    send(client, update("/interview документы", uid=1))
+    send(client, update("/skip", uid=2))
+    send(client, update("/stop", uid=3))
+    total = len(interview.block_indices("Документы"))
+    assert f"[2/{total}] Документы" in send(client, update("/interview", uid=4)).json()["text"]

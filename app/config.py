@@ -34,6 +34,9 @@ class Settings:
     telegram_secret: str = ""
     telegram_allowed_ids: frozenset = frozenset()
     outbox_ttl_days: float = 14.0
+    ada_summary_url: str = ""
+    ada_summary_token: str = ""
+    ada_timeout: float = 8.0
 
 
 def load_settings() -> Settings:
@@ -76,4 +79,6 @@ def load_settings() -> Settings:
         telegram_secret=secret,
         telegram_allowed_ids=allowed,
         outbox_ttl_days=float(os.environ.get("OUTBOX_TTL_DAYS", "14")),
+        ada_summary_url=os.environ.get("ADA_SUMMARY_URL", "").strip(),
+        ada_summary_token=os.environ.get("ADA_SUMMARY_TOKEN", "").strip(),
     )

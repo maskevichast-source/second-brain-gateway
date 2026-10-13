@@ -17,7 +17,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from . import ada as ada_module
 from . import ask as ask_module
+from . import review as review_module
 from . import links as links_module
 from . import people as people_module
 from . import llm as llm_module
@@ -67,6 +69,8 @@ class AskRequest(BaseModel):
     question: str = ""
     corpus: str = ""
     client: str = "ios"
+    mode: str = "day"
+    person: str = ""
 
 
 class RateLimiter:
@@ -362,12 +366,14 @@ def create_app(
         if error:
             return error
         now = clock()
+        ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
         result = await ask_module.answer_question(
             settings, notes, payload.question, now,
-            llm=lambda cfg, **kw: ask_llm(cfg, **kw),
+            llm=lambda cfg, **kw: ask_llm(cfg, **kw), ada_text=ada_text,
         )
-        logger.info("ask notes=%d used=%d omitted=%d private=%d fallback=%s qchars=%d",
-                    len(notes), result.used_notes, result.omitted, private, result.fallback, len(payload.question))
+        logger.info("ask notes=%d used=%d omitted=%d private=%d fallback=%s qchars=%d ada=%s",
+                    len(notes), result.used_notes, result.omitted, private, result.fallback,
+                    len(payload.question), bool(ada_text))
         return {
             "status": "success",
             "answer": result.answer,
@@ -385,8 +391,33 @@ def create_app(
         error, payload, notes, private = await read_vault_request(request, need_question=False)
         if error:
             return error
-        text = ask_module.build_digest(notes, clock())
-        logger.info("digest notes=%d private=%d", len(notes), private)
+        ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
+        week = payload.mode.strip().lower() in ("week", "неделя", "weekly")
+        if week:
+            text = review_module.build_week_review(notes, clock(), ada_text)
+        else:
+            text = ask_module.build_digest(notes, clock(), ada_brief=ada_text)
+        logger.info("digest mode=%s notes=%d private=%d ada=%s", "week" if week else "day", len(notes), private, bool(ada_text))
         return {"status": "success", "digest": text, "notes_total": len(notes) + private}
+
+    @app.post("/brief")
+    async def brief(request: Request):
+        error, payload, notes, private = await read_vault_request(request, need_question=False)
+        if error:
+            return error
+        if not payload.person.strip():
+            return _error(422, "Поле person пустое: напишите имя человека")
+        ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
+        text = review_module.build_brief(notes, payload.person[:100], clock(), ada_text)
+        logger.info("brief notes=%d private=%d", len(notes), private)
+        return {"status": "success", "brief": text, "notes_total": len(notes) + private}
+
+    @app.get("/finance")
+    async def finance(request: Request):
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        if not ada_module.configured(settings):
+            return {"status": "success", "configured": False, "summary": ""}
+        return {"status": "success", "configured": True, "summary": await ada_module.fetch_summary(settings)}
 
     return app

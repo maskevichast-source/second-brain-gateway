@@ -128,7 +128,7 @@ def _line(item: Item, today: date) -> str:
     return f"• {when}: {item.title}{extra} [{item.label}]"
 
 
-def build_digest(notes: list[VaultNote], now: datetime) -> str:
+def build_digest(notes: list[VaultNote], now: datetime, ada_brief: str = "") -> str:
     today = now.date()
     items = collect_items(notes, today)
     sections = (
@@ -155,6 +155,8 @@ def build_digest(notes: list[VaultNote], now: datetime) -> str:
         weak = [n for n in inbox if _conf(n) < 0.6]
         tail = f", из них неуверенных {len(weak)}" if weak else ""
         out += ["", f"Не разобрано во входящих: {len(inbox)}{tail}."]
+    if ada_brief:
+        out += ["", ada_brief]
     return "\n".join(out)
 
 
@@ -177,6 +179,7 @@ ASK_SYSTEM = """Ты отвечаешь на вопросы человека п�
 5. Учитывай статусы: «хочу» значит ещё не смотрел или не делал, «готово»/«сделано» значит закончено. Если вопрос про планы, закрытое не показывай.
 6. Если среди заметок есть противоречия или дубли, упомяни об этом одной строкой.
 7. Если заметок мало или вопрос шире, чем есть данных, скажи об этом честно.
+8. Блок <<<ФИНАНСЫ ... ФИНАНСЫ>>> (если есть) — агрегаты семейного бюджета из бота «Ада»: суммы, категории, долги, подписки, цели. Используй его для вопросов про деньги и траты; отдельных операций там нет, не выдумывай их. Если вопрос про деньги, а блока нет, скажи, что финансы не подключены.
 
 Формат ответа: JSON-объект {"answer": "текст ответа", "used": [номера заметок из квадратных скобок, на которые опирался ответ]}. Без пояснений вне JSON."""
 
@@ -202,13 +205,15 @@ def select_lines(notes: list[VaultNote], question: str, budget: int) -> tuple[li
     return [pairs[i] for i in chosen], len(pairs) - len(chosen)
 
 
-def build_ask_message(question: str, lines: list[str], now: datetime, timezone: str) -> str:
+def build_ask_message(question: str, lines: list[str], now: datetime, timezone: str, ada_text: str = "") -> str:
+    finance = ["<<<ФИНАНСЫ", _neutralize(ada_text), "ФИНАНСЫ>>>"] if ada_text else []
     return "\n".join([
         f"Сейчас: {now:%Y-%m-%d} ({WEEKDAYS[now.weekday()]}) {now:%H:%M}, пояс {timezone}",
         f"Вопрос: {_neutralize(question.strip())}",
         "<<<ЗАМЕТКИ",
         *[_neutralize(line) for line in lines],
         "ЗАМЕТКИ>>>",
+        *finance,
     ])
 
 
@@ -224,6 +229,7 @@ class AskResult:
 async def ask_llm(
     settings: Settings, *, question: str, lines: list[str], now: datetime,
     http_client: httpx.AsyncClient | None = None, retry_delay: float = 1.0, attempts: int = 2,
+    ada_text: str = "",
 ) -> dict | None:
     if not settings.deepseek_api_key:
         return None
@@ -231,7 +237,7 @@ async def ask_llm(
         "model": settings.deepseek_model,
         "messages": [
             {"role": "system", "content": ASK_SYSTEM},
-            {"role": "user", "content": build_ask_message(question, lines, now, settings.timezone)},
+            {"role": "user", "content": build_ask_message(question, lines, now, settings.timezone, ada_text)},
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.2,
@@ -278,12 +284,13 @@ def keyword_answer(pairs: list[tuple[VaultNote, str]], question: str, limit: int
 
 
 async def answer_question(
-    settings: Settings, notes: list[VaultNote], question: str, now: datetime, llm=ask_llm,
+    settings: Settings, notes: list[VaultNote], question: str, now: datetime, llm=ask_llm, ada_text: str = "",
 ) -> AskResult:
     pairs, omitted = select_lines(notes, question, settings.ask_budget_chars)
     if not pairs:
         return AskResult("Хранилище пустое: заметок для ответа нет.", [], 0, 0, False)
-    data = await llm(settings, question=question, lines=[line for _, line in pairs], now=now)
+    extra = {"ada_text": ada_text} if ada_text else {}
+    data = await llm(settings, question=question, lines=[line for _, line in pairs], now=now, **extra)
     if data is None:
         result = keyword_answer(pairs, question)
         result.omitted = omitted
