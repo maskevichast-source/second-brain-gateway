@@ -73,6 +73,10 @@ def build_week_review(notes: list[VaultNote], now: datetime, ada_text: str = "")
         out += ["", f"Документы с истекающим сроком (ближайшие {DOC_AHEAD_DAYS} дней):"] + [
             f"• {t} — до {fmt_date(date.fromisoformat(d))}" for d, t in docs[:6]]
 
+    days = {str(n.created)[:10] for n in notes if n.type == "journal" and (_created(n) or date.min) > week_ago}
+    if notes:
+        out += ["", f"Дневник: записи за {len(days)} из 7 последних дней."]
+
     backlog = Counter(n.type for n in notes if str(n.get("status")) == "хочу" and n.type in ("media", "place", "product"))
     if backlog:
         out += ["", "Список «хочу»: " + ", ".join(

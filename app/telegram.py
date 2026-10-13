@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Awaitable, Callable
 
-from . import interview
+from . import diary, interview
 from .config import Settings
 from .db import Database
 from .textutil import split_private
@@ -28,6 +28,7 @@ HELP = (
     "• Начни сообщение с «!» или «секрет:», чтобы текст не уходил в ИИ.\n"
     "• Если я переспрошу, ответь одним сообщением или напиши /skip, чтобы сохранить как есть.\n"
     "• Если в записи новый человек, я спрошу, кто это.\n"
+    "• /diary — вечерний дневник: расспрошу про день. Или сразу «дневник: текст». Время напоминания: /diary время 22:00.\n"
     "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки.\n"
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
     "/brief Имя — что знать перед встречей, /budget — бюджет из «Ады».\n"
@@ -77,7 +78,7 @@ def _learn_people(db: Database, response: dict) -> None:
 
 
 async def handle_update(
-    update: dict, *, settings: Settings, db: Database, process: Processor, secretary=None,
+    update: dict, *, settings: Settings, db: Database, process: Processor, secretary=None, clock=None,
 ) -> dict | None:
     """Возвращает ответ для Telegram (метод sendMessage) или None, если отвечать не нужно."""
     message = update.get("message")
@@ -105,7 +106,7 @@ async def handle_update(
         if cached:
             return cached
 
-    reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process, secretary=secretary)
+    reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process, secretary=secretary, clock=clock)
     if dedupe_key and reply:
         db.save(capture_id=dedupe_key, revision=1, response=reply)
     return reply
@@ -132,12 +133,16 @@ def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str) -> st
 
 
 async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
-                  secretary=None) -> dict:
+                  secretary=None, clock=None) -> dict:
+    now = clock() if clock else _now(settings)
     text = (message.get("text") or message.get("caption") or "").strip()
     if not text:
         return _reply(chat_id, "Пока принимаю только текст и ссылки. " + HELP.split("\n\n")[-1])
 
     command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
+    m = re.match(r"(?is)^дневник\s*[:\-—]\s*(.+)$", text)
+    if m and not command:
+        return await _diary_save(chat_id, update_id, {0: m.group(1).strip()}, settings, db, process, now=now)
     if command in ("/start", "/help"):
         return _reply(chat_id, HELP)
     if command in ("/ask", "/day", "/week", "/brief", "/budget"):
@@ -149,6 +154,8 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
         if command == "/brief" and not arg:
             return _reply(chat_id, "С кем встреча? Например: /brief Серик")
         return _reply(chat_id, await secretary(command[1:], arg[:1000]))
+    if command in ("/diary", "/дневник"):
+        return await _diary_command(chat_id, update_id, text, settings, db, process, now)
     if command == "/forget":
         removed = db.snapshot_clear()
         return _reply(chat_id, f"Стёр срез хранилища на сервере ({removed} записей). Новые записи снова попадут в него; "
@@ -179,6 +186,8 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
     state = db.get_state(chat_id)
     if state and state[0] == "interview" and state[1].get("paused"):
         state = None                          # интервью на паузе: сообщения обрабатываются как обычные записи
+    if state and state[0] == "diary" and command in ("", "/skip", "/done"):
+        return await _diary_step(chat_id, update_id, text, command, state[1], settings, db, process, now)
     # Ответ на вопрос про нового человека или интервью. Длинное сообщение или ссылка считаются новой записью.
     if state and not (command == "" and (len(text) > 400 or _URL.search(text))) and command in ("", "/skip"):
         kind, data = state
@@ -297,3 +306,76 @@ async def _interview_step(chat_id, update_id, text, command, data, db, process, 
         new["queue"] = queue
     db.set_state(chat_id, "interview", new)
     return _reply(chat_id, f"{note}\n{interview.question_text(queue[position], position, len(queue))}")
+
+
+# ---------- дневник ----------
+
+async def _diary_command(chat_id, update_id, text, settings, db, process, now) -> dict:
+    arg = " ".join(text.split()[1:]).strip()
+    low = arg.lower()
+    if low in ("выкл", "off", "выключить"):
+        db.set_setting("diary_on", "0")
+        return _reply(chat_id, "Вечернее напоминание выключено. Включить: /diary вкл.")
+    if low in ("вкл", "on", "включить"):
+        db.set_setting("diary_on", "1")
+        return _reply(chat_id, _diary_status(db, settings))
+    if low.startswith("время") or low.startswith("time"):
+        value = diary.parse_time(low.split(maxsplit=1)[1]) if len(low.split(maxsplit=1)) == 2 else None
+        if not value:
+            return _reply(chat_id, "Напиши время так: /diary время 21:30")
+        db.set_setting("diary_time", value)
+        db.set_setting("diary_on", "1")
+        return _reply(chat_id, _diary_status(db, settings))
+    if low in ("статус", "status"):
+        return _reply(chat_id, _diary_status(db, settings))
+    if arg:
+        return await _diary_save(chat_id, update_id, {0: arg}, settings, db, process, now=now)
+    day = diary.entry_date(now)
+    db.set_state(chat_id, "diary", {"i": 0, "answers": {}, "day": day.isoformat(), "private": False})
+    return _reply(chat_id, f"{diary.INTRO}\n\n{diary.question_text(0)}")
+
+
+def _now(settings: Settings):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(settings.timezone))
+
+
+def _diary_status(db: Database, settings: Settings) -> str:
+    on = db.get_setting("diary_on", "1") == "1"
+    at = db.get_setting("diary_time", "") or diary.DEFAULT_TIME
+    if not on:
+        return "Вечернее напоминание выключено. Включить: /diary вкл."
+    tail = "" if settings.telegram_bot_token else (
+        "\n⚠️ Сам написать первым я смогу, когда на сервере появится токен бота (TELEGRAM_BOT_TOKEN, README часть 5). "
+        "Пока можно поставить повторяющееся напоминание в iPhone (README, часть 9).")
+    return f"Напоминание про дневник: каждый вечер в {at} (если записи за день ещё нет).{tail}"
+
+
+async def _diary_step(chat_id, update_id, text, command, data, settings, db, process, now) -> dict:
+    index = int(data.get("i", 0))
+    answers = {int(k): v for k, v in (data.get("answers") or {}).items()}
+    private = bool(data.get("private"))
+    if command == "":
+        is_private, stripped = split_private(text)
+        private = private or is_private
+        answers[index] = stripped if is_private else text
+    if command == "/done" or index + 1 >= len(diary.QUESTIONS):
+        return await _diary_save(chat_id, update_id, answers, settings, db, process,
+                                 day=data.get("day"), private=private, now=now)
+    db.set_state(chat_id, "diary", {"i": index + 1, "answers": answers, "day": data.get("day"), "private": private})
+    return _reply(chat_id, diary.question_text(index + 1))
+
+
+async def _diary_save(chat_id, update_id, answers, settings, db, process, *, now, day=None, private=False) -> dict:
+    from datetime import date
+    db.clear_state(chat_id)
+    if not any(v.strip() for v in answers.values()):
+        return _reply(chat_id, "Пусто, ничего не записал. /diary начнёт заново.")
+    when = date.fromisoformat(day) if day else diary.entry_date(now)
+    content = diary.compile_entry(when, answers, private)
+    if len(content) > settings.max_content_chars:
+        return _reply(chat_id, f"Слишком длинно: максимум {settings.max_content_chars} символов. Раздели на части.")
+    response = await _save(db, process, capture_id=f"tgd-{update_id}", content=content, revision=2)
+    db.set_setting("diary_last_sent", now.date().isoformat())      # сегодня напоминать уже не нужно
+    return _reply(chat_id, "📓 Дневник записан. " + _summary(response))

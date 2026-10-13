@@ -4,11 +4,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -20,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from . import ada as ada_module
 from . import ask as ask_module
 from . import review as review_module
+from . import scheduler as scheduler_module
 from . import snapshot as snapshot_module
 from . import links as links_module
 from . import people as people_module
@@ -135,7 +138,17 @@ def create_app(
     db.init()
     limiter = RateLimiter(settings.rate_limit_per_minute)
 
-    app = FastAPI(title="Second Brain Gateway", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_app):
+        task = None
+        if settings.telegram_bot_token and settings.telegram_allowed_ids:
+            task = asyncio.create_task(scheduler_module.run_loop(
+                db, settings, clock, scheduler_module.telegram_sender(settings)))
+        yield
+        if task:
+            task.cancel()
+
+    app = FastAPI(title="Second Brain Gateway", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
     async def process(
         *, capture_id: str, client: str, content: str, revision: int, clarifications: str,
@@ -268,7 +281,7 @@ def create_app(
         except ValueError:
             return {}
         try:
-            reply = await handle_update(update, settings=settings, db=db, process=process, secretary=secretary)
+            reply = await handle_update(update, settings=settings, db=db, process=process, secretary=secretary, clock=clock)
         except Exception as exc:  # noqa: BLE001 — Telegram не должен засыпать нас повторами
             logger.error("telegram: ошибка обработки (%s)", type(exc).__name__)
             message = update.get("message") if isinstance(update, dict) else None

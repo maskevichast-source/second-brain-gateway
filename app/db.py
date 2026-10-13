@@ -210,6 +210,19 @@ class Database:
             conn.execute("DELETE FROM tg_pending WHERE chat_id = ?", (chat_id,))
             conn.commit()
 
+    # ---------- простые настройки бота (время напоминания и т.п.) ----------
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT value FROM profile WHERE key = ?", (f"cfg_{key}",)).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute("INSERT OR REPLACE INTO profile (key, value, updated_at) VALUES (?, ?, ?)",
+                         (f"cfg_{key}", value, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            conn.commit()
+
     # ---------- срез хранилища (короткие свойства заметок, без текстов) ----------
 
     def snapshot_put(self, rows: list[tuple[str, dict]], max_rows: int = 20000) -> None:
@@ -297,7 +310,7 @@ class Database:
 
     def clear_profile(self) -> None:
         with closing(self._connect()) as conn:
-            conn.execute("DELETE FROM profile WHERE key != 'snapshot_synced'")
+            conn.execute("DELETE FROM profile WHERE key = 'context'")
             conn.execute("DELETE FROM known_people")
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

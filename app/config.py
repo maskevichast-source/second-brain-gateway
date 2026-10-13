@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,8 @@ class Settings:
     telegram_allowed_ids: frozenset = frozenset()
     outbox_ttl_days: float = 14.0
     ada_summary_url: str = ""
-    ada_summary_token: str = ""
+    ada_summary_token: str = field(default="", repr=False)
+    telegram_bot_token: str = field(default="", repr=False)
     ada_timeout: float = 8.0
     snapshot_max_rows: int = 20000
 
@@ -82,4 +83,5 @@ def load_settings() -> Settings:
         outbox_ttl_days=float(os.environ.get("OUTBOX_TTL_DAYS", "14")),
         ada_summary_url=os.environ.get("ADA_SUMMARY_URL", "").strip(),
         ada_summary_token=os.environ.get("ADA_SUMMARY_TOKEN", "").strip(),
+        telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
     )

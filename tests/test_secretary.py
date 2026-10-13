@@ -155,3 +155,11 @@ def test_finance_endpoint_and_ask_gets_ada(make_client, monkeypatch):
 def test_finance_not_configured(make_client):
     r = make_client().get("/finance", headers=auth())
     assert r.json()["configured"] is False
+
+
+def test_week_review_counts_diary_days():
+    notes, _ = load_notes(corpus(
+        vault_note("День 1", type="journal", created="2026-10-11T21:00"),
+        vault_note("День 2", type="journal", created="2026-10-10T21:00"),
+        vault_note("Давно", type="journal", created="2026-09-01T21:00")))
+    assert "Дневник: записи за 2 из 7" in build_week_review(notes, FIXED_NOW)

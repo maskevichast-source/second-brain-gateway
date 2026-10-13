@@ -429,17 +429,35 @@ python "$HOME\Desktop\vault_sync.py" --url https://ТВОЙ-АДРЕС --vault "
 ### Что сказать про приватность честно
 В срезе есть названия твоих заметок, имена людей и даты. Это лежит в твоём сервисе на Railway под твоим аккаунтом. DeepSeek получает те же сжатые строки при вопросах `/ask`. Если что-то чувствительное, начинай запись с `!`.
 
+## Часть 9. Дневник и вечернее напоминание
+
+### В Telegram
+- `/diary` запускает пять коротких вопросов: как прошёл день, что получилось, что не получилось, что завтра, за что благодарен. Отвечай голосом через диктовку или текстом. `/skip` пропускает вопрос, `/done` сохраняет уже рассказанное, `/stop` отменяет.
+- Быстрее: напиши одним сообщением `дневник: сегодня закрыл вопрос с УК, устал, завтра звонить Серику`.
+- Ответ с `!` делает всю запись приватной: она сохранится без ИИ.
+- Из записи получится одна заметка `journal` за этот день (до 4 утра запись относится ко вчера) и отдельные дела `task` на завтра, если ты их назвал. Настроение пишется, только если ты сам назвал оценку дня.
+- Настройки: `/diary время 22:00` (по умолчанию 21:00), `/diary выкл`, `/diary вкл`, `/diary статус`.
+
+### Вечернее напоминание
+**Вариант 1. Бот пишет первым.** Нужен токен бота: добавь на Railway переменную `TELEGRAM_BOT_TOKEN` (токен от BotFather, часть 5). Сервер раз в минуту проверяет время и, если в этот день записи в дневнике ещё нет, пишет тебе в Telegram «Как прошёл день?» Один раз в день, повторов нет.
+
+**Вариант 2. Без токена, средствами iPhone.** Приложение «Напоминания» → **+** → «Дневник: как прошёл день?» → **«Время»** 21:00 → **«Повтор» → «Каждый день»**. Уведомление придёт в 21:00, открой Telegram и напиши `/diary`.
+
+**Вариант 3. Шорткат «Дневник» (диктовка).** Создай команду: «Диктовать текст» (русский, «После паузы») → «Получить содержимое URL» на `https://ТВОЙ-АДРЕС/capture`, метод POST, заголовок `x-api-key`, тело JSON: `capture_id` (то же, что в «Во Второй Мозг»), `client` = `ios`, `content` = «Дневник: » и продиктованный текст. Дальше сохранение в Obsidian, как в основном шорткате. Запуск сам: «Автоматизация» → «Время суток» → 21:00 → «Выполнить команду».
+
+Обзор недели показывает, сколько дней из семи ты вёл дневник.
+
 ## Для разработчика
 
 ```bash
 python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements-dev.txt
-pytest                                               # 195+ тестов, без сети
+pytest                                               # 205 тестов, без сети
 set CAPTURE_TOKEN=<не короче 24 символов>            # локальный запуск
 uvicorn app.main:create_app --factory --reload
 ```
 
-Переменные окружения: `CAPTURE_TOKEN` (обязательно), `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`, `DATA_DIR`, `APP_TIMEZONE`, `LLM_TIMEOUT_SECONDS` (60), `RATE_LIMIT_PER_MINUTE` (30), `MAX_CONTENT_CHARS` (20000), `MAX_CORPUS_CHARS` (3000000), `ASK_BUDGET_CHARS` (80000), `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ALLOWED_USER_IDS`, `OUTBOX_TTL_DAYS` (14), `ADA_SUMMARY_URL`, `ADA_SUMMARY_TOKEN` (финансы «Ады», необязательно), `ADA_TIMEOUT` не нужен: 8 секунд зашито.
+Переменные окружения: `CAPTURE_TOKEN` (обязательно), `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`, `DATA_DIR`, `APP_TIMEZONE`, `LLM_TIMEOUT_SECONDS` (60), `RATE_LIMIT_PER_MINUTE` (30), `MAX_CONTENT_CHARS` (20000), `MAX_CORPUS_CHARS` (3000000), `ASK_BUDGET_CHARS` (80000), `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ALLOWED_USER_IDS`, `OUTBOX_TTL_DAYS` (14), `ADA_SUMMARY_URL`, `ADA_SUMMARY_TOKEN` (финансы «Ады», необязательно), `TELEGRAM_BOT_TOKEN` (вечерние напоминания, необязательно), `ADA_TIMEOUT` не нужен: 8 секунд зашито.
 
 Контракт `POST /capture` (заголовок `x-api-key`) — тело: `capture_id`, `client`, `input_type` (`text`|`url`), `content`, `revision` (1|2), `user_clarifications`. Ответ: `schema`, `count`, `files` (`filename`, `folder`, `type`, `title`, `markdown`), `needs_review_flag` (`yes`|`no`), `review_text`, `review_questions`, `message`, `fallback`, `private`. Для старого шортката первый файл продублирован в `filename`/`folder`/`markdown`.
 
