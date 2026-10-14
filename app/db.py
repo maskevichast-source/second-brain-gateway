@@ -250,6 +250,11 @@ class Database:
             rows = conn.execute("SELECT front FROM snapshot ORDER BY updated_at, key").fetchall()
         return [json.loads(row["front"]) for row in rows]
 
+    def snapshot_items(self) -> list[tuple[str, dict]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT key, front FROM snapshot ORDER BY updated_at, key").fetchall()
+        return [(row["key"], json.loads(row["front"])) for row in rows]
+
     def snapshot_info(self) -> tuple[int, str]:
         with closing(self._connect()) as conn:
             count = conn.execute("SELECT COUNT(*) FROM snapshot").fetchone()[0]

@@ -12,7 +12,7 @@ from typing import Any
 from .textutil import one_line
 from .vault import EXTRA_FIELDS, VaultNote, parse_note
 
-KEEP = ("title", "type", "kind", "status", "area", "created", "stage", "confidence", "priority") + EXTRA_FIELDS
+KEEP = ("title", "type", "kind", "status", "area", "created", "stage", "confidence", "priority", "source_url") + EXTRA_FIELDS
 LIST_KEEP = ("people", "tags", "aliases", "interests", "gift_ideas")
 PERSON_KEEP = ("name", "relation", "relation_group", "last_contact", "preferences", "family", "how_met", "contact_goal",
                "event_end", "location", "follow_up")

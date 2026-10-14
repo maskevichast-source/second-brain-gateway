@@ -33,6 +33,8 @@ HELP = (
     "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки.\n"
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
     "/brief Имя — что знать перед встречей, /budget — бюджет из «Ады».\n"
+    "• /health — проверка базы (дубли, зависшее). /remember — вспомню старые идеи и хотелки.\n"
+    "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
     "• /people — кого я знаю. /status — сколько заметок ждут выгрузки. /sync — состояние среза, /forget — стереть срез.\n\n"
     "Голосовые сообщения расшифровываю (если подключён сервис речи, README часть 10). Фото пока не принимаю: преврати в текст, на iPhone есть «Скопировать текст» с фото."
 )
@@ -84,6 +86,9 @@ async def handle_update(
     update: dict, *, settings: Settings, db: Database, process: Processor, secretary=None, clock=None, transcriber=None,
 ) -> dict | None:
     """Возвращает ответ для Telegram (метод sendMessage) или None, если отвечать не нужно."""
+    callback = update.get("callback_query")
+    if isinstance(callback, dict):
+        return _callback(callback, settings, db, clock)
     message = update.get("message")
     if not isinstance(message, dict):
         return None
@@ -149,10 +154,14 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return await _diary_save(chat_id, update_id, {0: m.group(1).strip()}, settings, db, process, now=now)
     if command in ("/start", "/help"):
         return _reply(chat_id, HELP)
-    if command in ("/ask", "/day", "/week", "/brief", "/budget"):
+    if command == "/push":
+        return _reply(chat_id, _push_command(text, db, settings))
+    if command in ("/ask", "/day", "/week", "/brief", "/budget", "/health", "/remember"):
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
             return _reply(chat_id, "Эта команда пока недоступна.")
+        if command in ("/health", "/remember"):
+            arg = ""
         if command == "/ask" and not arg:
             return _reply(chat_id, "Напиши вопрос после команды, например: /ask что я обещал Серику?")
         if command == "/brief" and not arg:
@@ -424,3 +433,65 @@ async def _diary_save(chat_id, update_id, answers, settings, db, process, *, now
     response = await _save(db, process, capture_id=f"tgd-{update_id}", content=content, revision=2)
     db.set_setting("diary_last_sent", now.date().isoformat())      # сегодня напоминать уже не нужно
     return _reply(chat_id, "📓 Дневник записан. " + _summary(response))
+
+
+# ---------- сообщения, которые бот присылает сам: настройка и кнопки ----------
+
+def _push_command(text: str, db: Database, settings: Settings) -> str:
+    from . import scheduler
+
+    parts = text.lower().split()[1:]
+    cfg = scheduler.push_config(db)
+    if parts[:1] == ["утро"] and len(parts) >= 2:
+        if parts[1] in ("выкл", "off"):
+            db.set_setting("push_morning_on", "0")
+        elif parts[1] in ("вкл", "on"):
+            db.set_setting("push_morning_on", "1")
+        else:
+            value = diary.parse_time(parts[1])
+            if not value:
+                return "Время пиши так: /push утро 08:30"
+            db.set_setting("push_morning_time", value)
+            db.set_setting("push_morning_on", "1")
+    elif parts[:1] == ["неделя"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
+        db.set_setting("push_week_on", "1" if parts[1] in ("вкл", "on") else "0")
+    elif parts[:1] == ["напоминания"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
+        db.set_setting("push_rem_on", "1" if parts[1] in ("вкл", "on") else "0")
+    elif parts:
+        return ("Команды: /push утро 08:30, /push утро выкл, /push неделя выкл, /push напоминания выкл. "
+                "Дневник отдельно: /diary время 21:00, /diary выкл.")
+    cfg = scheduler.push_config(db)
+    d_on, d_at = scheduler.get_diary_config(db)
+    yes = lambda v: "вкл" if v else "выкл"  # noqa: E731
+    tail = "" if settings.telegram_bot_token else "\n⚠️ Пока на сервере нет токена бота, сам я писать не могу."
+    return ("Что я присылаю сам:\n"
+            f"• утренняя сводка: {yes(cfg['morning_on'])}, {cfg['morning_time']}\n"
+            f"• напоминания в срок (с кнопками «через час»): {yes(cfg['rem_on'])}\n"
+            f"• обзор недели (воскресенье, 19:00): {yes(cfg['week_on'])}\n"
+            f"• дневник вечером: {yes(d_on)}, {d_at}" + tail)
+
+
+def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict | None:
+    from datetime import timedelta
+
+    user_id = (callback.get("from") or {}).get("id")
+    if user_id not in settings.telegram_allowed_ids:
+        return None
+    data = str(callback.get("data") or "")
+    action, _, key = data.partition(":")
+    now = clock() if clock else _now(settings)
+    if not re.fullmatch(r"[0-9a-f]{12}", key):
+        toast = "Не понял кнопку"
+    elif action == "ok":
+        db.set_setting(f"rem_{key}", "done")
+        toast = "Ок, больше не напомню"
+    elif action == "snz1":
+        db.set_setting(f"rem_{key}", (now + timedelta(hours=1)).replace(tzinfo=None, microsecond=0).isoformat(timespec="minutes"))
+        toast = "Напомню через час"
+    elif action == "snz24":
+        tomorrow = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0, tzinfo=None)
+        db.set_setting(f"rem_{key}", tomorrow.isoformat(timespec="minutes"))
+        toast = "Напомню завтра в 9:00"
+    else:
+        toast = "Не понял кнопку"
+    return {"method": "answerCallbackQuery", "callback_query_id": callback.get("id", ""), "text": toast}

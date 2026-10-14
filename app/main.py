@@ -479,6 +479,11 @@ def create_app(
             return ask_module.build_digest(notes, now, ada_brief=ada_text)
         if kind == "week":
             return review_module.build_week_review(notes, now, ada_text)
+        if kind == "health":
+            return review_module.format_health(notes, now.date())
+        if kind == "remember":
+            back = review_module.format_resurface(review_module.pick_resurface(notes, now.date(), count=3, min_age=14), now.date())
+            return back or "Пока нет достаточно старых идей и хотелок, чтобы вспомнить."
         if kind == "brief":
             return review_module.build_brief(notes, arg, now, ada_text)
         result = await ask_module.answer_question(
