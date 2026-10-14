@@ -3,6 +3,12 @@
 Вопросы сгруппированы в блоки. Можно пройти всё подряд (/interview) или один блок (/interview дом).
 """
 
+import re
+from datetime import datetime
+
+from .frontmatter import Raw, dump
+from .textutil import file_suffix, slugify
+
 INTRO = (
     "Начинаем интервью. Я задам около {total} вопросов блоками: ты, семья, люди, дом, работа, документы, "
     "деньги, здоровье, отдых, цели и другое. Отвечай как удобно, хоть обрывками, голосом через диктовку.\n\n"
@@ -138,3 +144,43 @@ def question_text(index: int, position: int | None = None, total: int | None = N
 def answer_as_content(index: int, answer: str) -> str:
     block, text = QUESTIONS[index]
     return f"[Интервью, блок «{block}»] Вопрос: {text}\nОтвет: {answer}"
+
+
+# ---------- отказы и сырые ответы ----------
+
+_NEG_WORDS = frozenset(
+    "нет нету неа не ни ничего никого никаких никакой никому нечего пока пусто ноль знаю помню хочу надо нужно было "
+    "такого такой таких такие такая пока вообще совсем таких одного есть у меня сейчас пропускаю пропуск дальше "
+    "ладно спасибо потом позже да".split()
+)
+_NEG_CORE = frozenset("нет нету неа ничего никого никаких нечего пусто пропускаю пропуск дальше".split())
+
+
+def is_non_answer(text: str) -> bool:
+    """Короткий отказ вроде «нет», «нет таких», «не знаю», «пока ничего»: в базу такое не пишем."""
+    tokens = re.findall(r"[а-яёa-z0-9]+", text.lower())
+    if not tokens or len(tokens) > 6 or any(t.isdigit() for t in tokens):
+        return not tokens
+    if not all(t in _NEG_WORDS for t in tokens):
+        return False
+    pairs = any(a == "не" and b in ("знаю", "помню", "хочу", "надо", "нужно") for a, b in zip(tokens, tokens[1:]))
+    return bool(_NEG_CORE & set(tokens)) or pairs or tokens == ["не"]
+
+
+def block_file(block: str, qa: list[tuple[str, str]], now: datetime, seed: str) -> dict:
+    """Одна аккуратная заметка с сырыми ответами блока. Собирает код, ИИ не нужен."""
+    title = f"Интервью — {block}"
+    items = [
+        ("schema", 1), ("title", title),
+        ("summary", f"Ответы на вопросы интервью, блок «{block}»"),
+        ("created", Raw(f"{now:%Y-%m-%dT%H:%M}")), ("type", "note"), ("area", None),
+        ("tags", ["интервью"]), ("source", "telegram"), ("capture_id", seed), ("confidence", 1),
+    ]
+    body = ["Сырые ответы. Из них извлечены отдельные заметки (люди, документы, дела и т.д.); эта страница остаётся источником.", ""]
+    for question, answer in qa:
+        body += [f"**{question}**", answer.strip(), ""]
+    markdown = dump(items) + "\n\n" + "\n".join(body).rstrip() + "\n"
+    return {
+        "filename": f"{now:%Y-%m-%d}-interview-{slugify(block)}-{file_suffix(seed)}.md",
+        "folder": "0-Inbox", "type": "note", "title": title, "markdown": markdown,
+    }

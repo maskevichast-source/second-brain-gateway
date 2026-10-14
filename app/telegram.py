@@ -18,7 +18,8 @@ from typing import Awaitable, Callable
 from . import diary, interview
 from .config import Settings
 from .db import Database
-from .textutil import split_private
+from .textutil import one_line, split_private
+from .snapshot import rows_from_markdown as snapshot_rows
 from .vault import parse_note
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ HELP = (
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
     "/brief Имя — что знать перед встречей, /budget — бюджет из «Ады».\n"
     "• /people — кого я знаю. /status — сколько заметок ждут выгрузки. /sync — состояние среза, /forget — стереть срез.\n\n"
-    "Голос и фото пока не принимаю: сначала преврати их в текст (на iPhone есть диктовка с клавиатуры)."
+    "Голосовые сообщения расшифровываю (если подключён сервис речи, README часть 10). Фото пока не принимаю: преврати в текст, на iPhone есть «Скопировать текст» с фото."
 )
 
 Processor = Callable[..., Awaitable[dict]]
@@ -52,6 +53,8 @@ def _reply(chat_id: int, text: str) -> dict:
 
 def _summary(response: dict) -> str:
     files = response.get("files", [])
+    if response.get("count", 1) == 0:
+        return "🤷 Сохранять нечего: конкретных фактов не нашёл."
     if response.get("private"):
         head = "🔒 Сохранил без ИИ."
     elif response.get("fallback"):
@@ -78,7 +81,7 @@ def _learn_people(db: Database, response: dict) -> None:
 
 
 async def handle_update(
-    update: dict, *, settings: Settings, db: Database, process: Processor, secretary=None, clock=None,
+    update: dict, *, settings: Settings, db: Database, process: Processor, secretary=None, clock=None, transcriber=None,
 ) -> dict | None:
     """Возвращает ответ для Telegram (метод sendMessage) или None, если отвечать не нужно."""
     message = update.get("message")
@@ -106,7 +109,8 @@ async def handle_update(
         if cached:
             return cached
 
-    reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process, secretary=secretary, clock=clock)
+    reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process,
+                          secretary=secretary, clock=clock, transcriber=transcriber)
     if dedupe_key and reply:
         db.save(capture_id=dedupe_key, revision=1, response=reply)
     return reply
@@ -132,15 +136,15 @@ def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str) -> st
             "день рождения) одним сообщением или /skip.")
 
 
-async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
-                  secretary=None, clock=None) -> dict:
+async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
+                       secretary=None, clock=None) -> dict:
     now = clock() if clock else _now(settings)
     text = (message.get("text") or message.get("caption") or "").strip()
     if not text:
         return _reply(chat_id, "Пока принимаю только текст и ссылки. " + HELP.split("\n\n")[-1])
 
     command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
-    m = re.match(r"(?is)^дневник\s*[:\-—]\s*(.+)$", text)
+    m = re.match(r"(?is)^дневник\s*[:.,\-—]\s*(.+)$", text)
     if m and not command:
         return await _diary_save(chat_id, update_id, {0: m.group(1).strip()}, settings, db, process, now=now)
     if command in ("/start", "/help"):
@@ -192,7 +196,7 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
     if state and not (command == "" and (len(text) > 400 or _URL.search(text))) and command in ("", "/skip"):
         kind, data = state
         if kind == "interview":
-            return await _interview_step(chat_id, update_id, text, command, data, db, process, settings)
+            return await _interview_step(chat_id, update_id, text, command, data, db, process, settings, now)
         if kind == "person":
             return await _person_step(chat_id, update_id, text, command, data, db, process, settings)
     if state and command == "" and state[0] == "person":
@@ -226,6 +230,28 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
     if new:
         return _reply(chat_id, _ask_person(chat_id, db, new[:4], summary))
     return _reply(chat_id, summary)
+
+
+async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
+                  secretary=None, clock=None, transcriber=None) -> dict:
+    """Голосовые превращаются в текст и идут дальше как обычные сообщения."""
+    voice = message.get("voice") or message.get("audio") or message.get("video_note")
+    text = (message.get("text") or message.get("caption") or "").strip()
+    if not voice or text:
+        return await _answer_text(message, chat_id, update_id, settings=settings, db=db, process=process,
+                                  secretary=secretary, clock=clock)
+    if transcriber is None:
+        return _reply(chat_id, "Голосовые пока не включены: нужен ключ сервиса распознавания речи (STT_API_KEY, README, часть 10). "
+                               "Пока можно продиктовать текст клавиатурой iPhone (значок микрофона).")
+    if int(voice.get("duration") or 0) > 300:
+        return _reply(chat_id, "Голосовое длиннее 5 минут: раздели его на части.")
+    transcript = await transcriber(voice.get("file_id", ""))
+    if not transcript:
+        return _reply(chat_id, "Не смог расшифровать голосовое. Попробуй ещё раз или напиши текстом.")
+    reply = await _answer_text({**message, "text": transcript}, chat_id, update_id, settings=settings, db=db,
+                               process=process, secretary=secretary, clock=clock)
+    echo = f"🎙 «{one_line(transcript, 400)}»\n\n"
+    return {**reply, "text": (echo + str(reply.get("text", "")))[:4000]}
 
 
 # ---------- новый человек ----------
@@ -282,26 +308,45 @@ def _interview_start(chat_id: int, db: Database, arg: str = "") -> dict:
     return _reply(chat_id, f"{intro}\n\n{interview.question_text(queue[position], position, len(queue))}")
 
 
-async def _interview_step(chat_id, update_id, text, command, data, db, process, settings) -> dict:
+async def _interview_step(chat_id, update_id, text, command, data, db, process, settings, now=None) -> dict:
     queue = _queue(data)
     position, saved = int(data.get("i", 0)), int(data.get("saved", 0))
     index = queue[min(position, len(queue) - 1)]
+    qa = list(data.get("qa") or [])                       # [блок, вопрос, ответ] для сводной заметки блока
     note = ""
     if command != "/skip":
-        content = _wrap(text, lambda t: interview.answer_as_content(index, t))
-        if len(content) > settings.max_content_chars:
-            return _reply(chat_id, f"Слишком длинно: максимум {settings.max_content_chars} символов. Раздели на части.")
-        response = await _save(db, process, capture_id=f"tgi-{update_id}", content=content, revision=2)
-        saved += response.get("count", 0)
-        note = f"✅ Записал заметок: {response.get('count', 0)}. "
+        is_private, plain = split_private(text)
+        if interview.is_non_answer(plain):
+            note = "👌 Понял, пропускаю (в базу не пишу).\n"
+        else:
+            content = _wrap(text, lambda t: interview.answer_as_content(index, t))
+            if len(content) > settings.max_content_chars:
+                return _reply(chat_id, f"Слишком длинно: максимум {settings.max_content_chars} символов. Раздели на части.")
+            response = await _save(db, process, capture_id=f"tgi-{update_id}", content=content, revision=2)
+            count = response.get("count", 0)
+            saved += count
+            if not is_private:                            # приватные ответы не копим даже в сводной заметке блока
+                qa.append([interview.QUESTIONS[index][0], interview.QUESTIONS[index][1], plain.strip()])
+            titles = [f["title"] for f in response.get("files", [])][:6]
+            note = ("✅ Записал: " + "; ".join(titles) + "\n") if titles else "📝 Ответ учтён, новых отдельных заметок нет.\n"
     position += 1
-    if position >= len(queue):
+    finished = position >= len(queue)
+    next_block = None if finished else interview.QUESTIONS[queue[position]][0]
+    # когда блок закончился, собираем его сырые ответы в одну заметку
+    current_block = interview.QUESTIONS[index][0]
+    if (finished or next_block != current_block) and any(row[0] == current_block for row in qa):
+        rows = [(q, a) for blk, q, a in qa if blk == current_block]
+        qa = [row for row in qa if row[0] != current_block]
+        file = interview.block_file(current_block, rows, now or _now(settings), f"tgib-{update_id}")
+        db.enqueue(f"tgib-{update_id}", [file])
+        db.snapshot_put(snapshot_rows(file["markdown"]), settings.snapshot_max_rows)
+        note += f"📚 Блок «{current_block}» собран в одну заметку.\n"
+    if finished:
         db.clear_state(chat_id)
         return _reply(chat_id, f"{note}Интервью закончено. Всего заметок: {saved}. "
-                               "Когда ноутбук или телефон заберёт очередь, они появятся в хранилище. "
-                               "Другие блоки: /interview блоки. Потом заполни файл «Профиль» и отправь его на сервер "
-                               "скриптом, чтобы я знал контекст.")
-    new = {"i": position, "saved": saved}
+                               "Когда телефон или ноутбук заберёт очередь, они появятся в хранилище. "
+                               "Другие блоки: /interview блоки.")
+    new = {"i": position, "saved": saved, "qa": qa}
     if "queue" in data:
         new["queue"] = queue
     db.set_state(chat_id, "interview", new)

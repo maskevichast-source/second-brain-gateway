@@ -76,6 +76,7 @@ class LLMResult(BaseModel):
     notes: list[LLMNote] = Field(default_factory=list)
     needs_review: bool = False
     review_questions: list[str] = Field(default_factory=list)
+    nothing_to_save: bool = False
 
     @field_validator("review_questions", mode="before")
     @classmethod
@@ -87,7 +88,7 @@ class LLMResult(BaseModel):
     @model_validator(mode="after")
     def _drop_empty(self):
         self.notes = [n for n in self.notes if n.title or n.body]
-        if not self.notes:
+        if not self.notes and not self.nothing_to_save:
             raise ValueError("в ответе модели нет заметок")
         return self
 

@@ -258,7 +258,7 @@ def test_interview_flow(tg):
     start = send(client, update("/interview", uid=1)).json()["text"]
     assert "Начинаем интервью" in start and "[1/" in start
     second = send(client, update("Владислав, Астана, айти", uid=2)).json()["text"]
-    assert "Записал заметок: 1" in second and "[2/" in second
+    assert "Записал: Диана" in second and "[2/" in second
     assert llm.calls[0]["revision"] == 2 and "Интервью, блок «Ты»" in llm.calls[0]["content"]
     assert "[3/" in send(client, update("/skip", uid=3)).json()["text"]
     assert send(client, update("/stop", uid=4)).json()["text"].startswith("Остановил")
@@ -350,3 +350,45 @@ def test_interview_block_survives_pause(tg):
     send(client, update("/stop", uid=3))
     total = len(interview.block_indices("Документы"))
     assert f"[2/{total}] Документы" in send(client, update("/interview", uid=4)).json()["text"]
+
+
+def test_interview_non_answers_are_not_saved(tg):
+    llm = StubLLM(result(note(type="person", title="Диана", body="жена")))
+    client = tg(llm)
+    send(client, update("/interview люди", uid=1))
+    for uid, text in enumerate(["Нет таких", "нет", "Не знаю", "-"], start=2):
+        out = send(client, update(text, uid=uid)).json()["text"]
+        assert "пропускаю" in out
+    assert llm.calls == []                                          # ИИ не вызывался
+    assert client.get("/pending", headers=auth()).json()["items"] == []
+
+
+def test_interview_block_summary_note_and_empty_ai_result(tg):
+    from app import interview
+
+    llm = StubLLM(result(note(type="person", title="Серик", body="друг", fields={"relation": "друг"})))
+    client = tg(llm)
+    send(client, update("/interview документы", uid=1))
+    total = len(interview.block_indices("Документы"))
+    out = None
+    for uid in range(2, 2 + total):
+        out = send(client, update("Договор аренды до декабря", uid=uid)).json()["text"]
+    assert "Блок «Документы» собран" in out and "Интервью закончено" in out
+    items = client.get("/pending", headers=auth()).json()["items"]
+    summary = [i for i in items if i["filename"].count("interview")]
+    assert len(summary) == 1
+    md = summary[0]["markdown"]
+    assert "title: \"Интервью — Документы\"" in md and "Договор аренды до декабря" in md and "Оригинал" not in md
+    # оригинал заметок интервью без служебной шапки
+    person = next(i for i in items if "Серик" in i["markdown"] and "interview" not in i["filename"])
+    assert "Интервью, Документы: Договор аренды до декабря" in person["markdown"] and "Вопрос:" not in person["markdown"]
+
+
+def test_empty_ai_result_saves_nothing(tg):
+    from app.llm import LLMResult
+
+    client = tg(StubLLM(LLMResult(notes=[], nothing_to_save=True)))
+    send(client, update("/interview дом", uid=1))
+    out = send(client, update("Ничего такого не вспомню толком, ЖК вроде Нурлы", uid=2)).json()["text"]
+    assert "новых отдельных заметок нет" in out
+    assert client.get("/pending", headers=auth()).json()["items"] == []

@@ -24,6 +24,7 @@ from . import ask as ask_module
 from . import review as review_module
 from . import scheduler as scheduler_module
 from . import snapshot as snapshot_module
+from . import stt as stt_module
 from . import links as links_module
 from . import people as people_module
 from . import llm as llm_module
@@ -125,12 +126,15 @@ def create_app(
     llm: Callable[..., Awaitable] | None = None,
     clock: Callable[[], datetime] | None = None,
     link_fetcher: Callable[..., Awaitable] | None = None,
+    transcriber: Callable[..., Awaitable] | None = None,
     ask_llm: Callable[..., Awaitable] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
+    transcriber_given = transcriber is not None
     llm = llm or llm_module.structure_capture
     link_fetcher = link_fetcher or links_module.fetch_link_info
     ask_llm = ask_llm or ask_module.ask_llm
+    transcriber = transcriber or (lambda file_id: stt_module.transcribe(settings, file_id))
     clock = clock or (lambda: datetime.now(ZoneInfo(settings.timezone)))
 
     db = Database(settings.data_dir / "brain.db", ttl_hours=settings.response_ttl_hours,
@@ -281,7 +285,8 @@ def create_app(
         except ValueError:
             return {}
         try:
-            reply = await handle_update(update, settings=settings, db=db, process=process, secretary=secretary, clock=clock)
+            reply = await handle_update(update, settings=settings, db=db, process=process, secretary=secretary, clock=clock,
+                                       transcriber=transcriber if stt_module.configured(settings) or transcriber_given else None)
         except Exception as exc:  # noqa: BLE001 — Telegram не должен засыпать нас повторами
             logger.error("telegram: ошибка обработки (%s)", type(exc).__name__)
             message = update.get("message") if isinstance(update, dict) else None

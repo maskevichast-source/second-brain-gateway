@@ -39,6 +39,9 @@ class Settings:
     telegram_bot_token: str = field(default="", repr=False)
     ada_timeout: float = 8.0
     snapshot_max_rows: int = 20000
+    stt_api_key: str = field(default="", repr=False)
+    stt_base_url: str = "https://api.groq.com/openai/v1"
+    stt_model: str = "whisper-large-v3-turbo"
 
 
 def load_settings() -> Settings:
@@ -84,4 +87,7 @@ def load_settings() -> Settings:
         ada_summary_url=os.environ.get("ADA_SUMMARY_URL", "").strip(),
         ada_summary_token=os.environ.get("ADA_SUMMARY_TOKEN", "").strip(),
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
+        stt_api_key=os.environ.get("STT_API_KEY", "").strip(),
+        stt_base_url=os.environ.get("STT_BASE_URL", "https://api.groq.com/openai/v1").strip().rstrip("/"),
+        stt_model=os.environ.get("STT_MODEL", "whisper-large-v3-turbo").strip(),
     )

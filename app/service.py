@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlparse
@@ -228,8 +230,27 @@ def _fallback_notes(content: str, links: list[LinkInfo]) -> list[LLMNote]:
 
 # ---------- ответ ----------
 
-def _original_block(content: str, clarifications: str) -> str:
+_INTERVIEW_HEAD = re.compile(r"^\[Интервью, блок «([^»]+)»\] Вопрос: .*?\nОтвет: ", re.S)
+_DIARY_HEAD = re.compile(r"^\[Дневник за ([^\]]+)\][^\n]*\n?")
+
+
+def display_original(content: str) -> str:
+    """Убирает служебные подсказки бота из блока «Оригинал»: остаются слова человека."""
     text = content.strip()
+    private = text.startswith("! ")
+    body = text[2:] if private else text
+    m = _INTERVIEW_HEAD.match(body)
+    if m:
+        body = f"Интервью, {m.group(1)}: " + body[m.end():]
+    else:
+        m = _DIARY_HEAD.match(body)
+        if m:
+            body = f"Дневник за {m.group(1)}\n" + body[m.end():]
+    return ("! " if private else "") + body
+
+
+def _original_block(content: str, clarifications: str) -> str:
+    text = display_original(content)
     if clarifications.strip():
         text += f"\n\nУточнение: {clarifications.strip()}"
     return "> [!quote]- Оригинал\n" + quote_block(text)
@@ -281,6 +302,14 @@ def build_response(
     link_map = {info.url: info for info in links}
     fallback = result is None
     raw_notes = _fallback_notes(content, links) if fallback else list(result.notes)
+    if not raw_notes:                      # ИИ нашёл, что сохранять нечего (например, ответ «нет» в интервью)
+        return {
+            "status": "success", "schema": schema.SCHEMA_VERSION, "capture_id": capture_id, "revision": revision,
+            "new_people": [], "reminders": [], "reminders_count": 0, "needs_review": False,
+            "needs_review_flag": "no", "review_questions": [], "review_text": "", "fallback": False,
+            "private": False, "count": 0, "nothing_to_save": True, "message": "Новых фактов нет",
+            "files": [], "filename": "", "folder": "", "markdown": "",
+        }
 
     # имена людей приводим к каноническим (по списку известных) и находим новых
     index = people_module.build_index(known_people or [])
