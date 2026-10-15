@@ -180,3 +180,17 @@ def test_merge_preview_lists_duplicates_without_deleting():
     assert "Похожих групп: 2" in text and "Ничего не удаляю" in text
     assert "«Серик Ахметов»" in text and "оставить главной" in text
     assert format_merge(notes[4:]) == "Дублей не нашёл."
+
+
+def test_budget_statuses_are_russian():
+    def line(status):
+        data = {**SUMMARY, "top_categories": [{"name": "Еда", "spent": 90, "limit": 100, "status": status}]}
+        return ada.format_summary(data)
+
+    assert "Еда 90 ₸ из 100 ₸ (превышен)" in line("over")
+    assert "(почти исчерпан)" in line("warn")
+    assert "(" not in line("ok").split("категории:")[1].split("\n")[0]
+    assert "(" not in line("none").split("категории:")[1].split("\n")[0]
+    assert "(превышен)" in line("превышен")
+    assert "(странный)" in line("странный")          # неизвестный статус не ломает вывод
+    assert ada.status_ru(None) == "" and ada.status_ru(5) == "5"

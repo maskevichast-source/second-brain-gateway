@@ -38,6 +38,21 @@ def _s(value: Any, limit: int = 60) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+# Статусы лимита категории из build_summary «Ады»: ok / warn / over / none.
+STATUS_RU = {
+    "ok": "в норме", "ок": "в норме", "в норме": "в норме",
+    "warn": "почти исчерпан", "warning": "почти исчерпан", "near": "почти исчерпан",
+    "over": "превышен", "exceeded": "превышен",
+    "none": "",
+}
+
+
+def status_ru(status: Any) -> str:
+    """Русская подпись статуса лимита. Неизвестное значение показываем как есть, пустое скрываем."""
+    raw = _s(status, 30)
+    return STATUS_RU.get(raw.lower(), raw)
+
+
 def format_summary(data: dict) -> str:
     """Превращает ответ /api/secretary в короткий русский текст. Устойчив к пропускам полей."""
     if not isinstance(data, dict):
@@ -65,8 +80,9 @@ def format_summary(data: dict) -> str:
             row = f"{_s(c.get('name'))} {money(c.get('spent'), cur)}"
             if _num(c.get("limit")):
                 row += f" из {money(c['limit'], cur)}"
-                if _s(c.get("status")) and _s(c.get("status")) not in ("ok", "ок", "в норме"):
-                    row += f" ({_s(c['status'])})"
+                label = status_ru(c.get("status"))
+                if label and label != "в норме":
+                    row += f" ({label})"
             rows.append(row)
         lines.append("• категории: " + "; ".join(rows))
     debts = data.get("debts") if isinstance(data.get("debts"), dict) else {}
