@@ -85,7 +85,7 @@ def movie_result():
 
 @pytest.fixture
 def make_client(tmp_path):
-    def _make(llm=None, links=None, ask_llm=None, transcriber=None, **overrides):
+    def _make(llm=None, links=None, ask_llm=None, transcriber=None, expand_llm=None, **overrides):
         settings = make_settings(tmp_path, **overrides)
         app = create_app(
             settings=settings,
@@ -93,6 +93,7 @@ def make_client(tmp_path):
             clock=lambda: FIXED_NOW,
             link_fetcher=links or StubLinks(),
             ask_llm=ask_llm,
+            expand_llm=expand_llm,
             transcriber=transcriber,
         )
         return TestClient(app)

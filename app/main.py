@@ -128,12 +128,14 @@ def create_app(
     link_fetcher: Callable[..., Awaitable] | None = None,
     transcriber: Callable[..., Awaitable] | None = None,
     ask_llm: Callable[..., Awaitable] | None = None,
+    expand_llm: Callable[..., Awaitable] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     transcriber_given = transcriber is not None
     llm = llm or llm_module.structure_capture
     link_fetcher = link_fetcher or links_module.fetch_link_info
     ask_llm = ask_llm or ask_module.ask_llm
+    expand_llm = expand_llm or ask_module.expand_query
     transcriber = transcriber or (lambda file_id: stt_module.transcribe(settings, file_id))
     clock = clock or (lambda: datetime.now(ZoneInfo(settings.timezone)))
 
@@ -394,6 +396,7 @@ def create_app(
         result = await ask_module.answer_question(
             settings, notes, payload.question, now,
             llm=lambda cfg, **kw: ask_llm(cfg, **kw), ada_text=ada_text,
+            expander=expand_llm,
         )
         logger.info("ask notes=%d used=%d omitted=%d private=%d fallback=%s qchars=%d ada=%s",
                     len(notes), result.used_notes, result.omitted, private, result.fallback,
@@ -481,13 +484,16 @@ def create_app(
             return review_module.build_week_review(notes, now, ada_text)
         if kind == "health":
             return review_module.format_health(notes, now.date())
+        if kind == "merge":
+            return review_module.format_merge(notes)
         if kind == "remember":
             back = review_module.format_resurface(review_module.pick_resurface(notes, now.date(), count=3, min_age=14), now.date())
             return back or "Пока нет достаточно старых идей и хотелок, чтобы вспомнить."
         if kind == "brief":
             return review_module.build_brief(notes, arg, now, ada_text)
         result = await ask_module.answer_question(
-            settings, notes, arg, now, llm=lambda cfg, **kw: ask_llm(cfg, **kw), ada_text=ada_text)
+            settings, notes, arg, now, llm=lambda cfg, **kw: ask_llm(cfg, **kw), ada_text=ada_text,
+            expander=expand_llm)
         text = result.answer
         if result.sources:
             text += "\n\nИсточники:\n" + "\n".join(f"• {t}" for t in result.sources[:8])

@@ -114,8 +114,8 @@ def test_commands_media_and_limits(tg):
     assert "Пришли мысль" in send(client, update("/start", uid=1)).json()["text"]
     assert "Ждут выгрузки в хранилище: 0" in send(client, update("/status", uid=2)).json()["text"]
     assert "Не знаю такой команды" in send(client, update("/abracadabra", uid=3)).json()["text"]
-    photo = {"update_id": 4, "message": {"from": {"id": ME}, "chat": {"id": ME, "type": "private"}, "photo": [{}]}}
-    assert "только текст" in send(client, photo).json()["text"]
+    photo = {"update_id": 4, "message": {"from": {"id": ME}, "chat": {"id": ME, "type": "private"}, "sticker": {}}}
+    assert "Принимаю текст" in send(client, photo).json()["text"]
     assert "Слишком длинно" in send(client, update("а" * 51, uid=5)).json()["text"]
 
 
@@ -392,3 +392,25 @@ def test_empty_ai_result_saves_nothing(tg):
     out = send(client, update("Ничего такого не вспомню толком, ЖК вроде Нурлы", uid=2)).json()["text"]
     assert "новых отдельных заметок нет" in out
     assert client.get("/pending", headers=auth()).json()["items"] == []
+
+
+def test_forwarded_message_keeps_who_sent_it(tg):
+    llm = StubLLM(result(note(type="task", title="Прислать смету", body="Прислать смету")))
+    client = tg(llm)
+    reply = send(client, update("Нужна смета до пятницы", forward_origin={
+        "type": "user", "sender_user": {"first_name": "Серик", "last_name": "Ахметов"}})).json()
+    assert reply["method"] == "sendMessage"
+    assert "Переслано от Серик Ахметов: Нужна смета до пятницы" in llm.calls[0]["content"]
+
+
+def test_photo_with_caption_and_bare_document_are_saved_without_questions(tg):
+    llm = StubLLM(result(note(type="document", title="Чек", body="Чек")))
+    client = tg(llm)
+    p = update("", uid=5, photo=[{"file_id": "x"}], caption="Чек за замок")
+    p["message"].pop("text")
+    assert send(client, p).json()["method"] == "sendMessage"
+    assert "Чек за замок\n(вложение в Telegram: фото)" in llm.calls[0]["content"]
+    d = update("", uid=6, document={"file_id": "y", "file_name": "договор.pdf"})
+    d["message"].pop("text")
+    send(client, d)
+    assert "Вложение в Telegram: файл «договор.pdf»" in llm.calls[1]["content"]

@@ -33,7 +33,7 @@ HELP = (
     "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки.\n"
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
     "/brief Имя — что знать перед встречей, /budget — бюджет из «Ады».\n"
-    "• /health — проверка базы (дубли, зависшее). /remember — вспомню старые идеи и хотелки.\n"
+    "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли и что с чем слить. /remember — вспомню старые идеи и хотелки.\n"
     "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
     "• /people — кого я знаю. /status — сколько заметок ждут выгрузки. /sync — состояние среза, /forget — стереть срез.\n\n"
     "Голосовые сообщения расшифровываю (если подключён сервис речи, README часть 10). Фото пока не принимаю: преврати в текст, на iPhone есть «Скопировать текст» с фото."
@@ -146,7 +146,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     now = clock() if clock else _now(settings)
     text = (message.get("text") or message.get("caption") or "").strip()
     if not text:
-        return _reply(chat_id, "Пока принимаю только текст и ссылки. " + HELP.split("\n\n")[-1])
+        return _reply(chat_id, "Принимаю текст, ссылки, голосовые, пересылки и фото/файлы с подписью. " + HELP.split("\n\n")[-1])
 
     command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
     m = re.match(r"(?is)^дневник\s*[:.,\-—]\s*(.+)$", text)
@@ -156,11 +156,11 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return _reply(chat_id, HELP)
     if command == "/push":
         return _reply(chat_id, _push_command(text, db, settings))
-    if command in ("/ask", "/day", "/week", "/brief", "/budget", "/health", "/remember"):
+    if command in ("/ask", "/day", "/week", "/brief", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
             return _reply(chat_id, "Эта команда пока недоступна.")
-        if command in ("/health", "/remember"):
+        if command in ("/health", "/remember", "/merge"):
             arg = ""
         if command == "/ask" and not arg:
             return _reply(chat_id, "Напиши вопрос после команды, например: /ask что я обещал Серику?")
@@ -241,9 +241,40 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     return _reply(chat_id, summary)
 
 
+def _forward_name(message: dict) -> str:
+    origin = message.get("forward_origin") or {}
+    if origin:
+        user = origin.get("sender_user") or {}
+        name = (" ".join(x for x in (user.get("first_name"), user.get("last_name")) if x)
+                or origin.get("sender_user_name") or (origin.get("chat") or {}).get("title") or "")
+    else:  # старый формат Bot API
+        user = message.get("forward_from") or {}
+        name = (" ".join(x for x in (user.get("first_name"), user.get("last_name")) if x)
+                or message.get("forward_sender_name") or (message.get("forward_from_chat") or {}).get("title") or "")
+    return name.strip() or ("кого-то" if origin or message.get("forward_date") else "")
+
+
+def _decorate(message: dict) -> dict:
+    """Пересылки и вложения превращаются в обычный текст записи (без вопросов и без распознавания картинок)."""
+    text = (message.get("text") or message.get("caption") or "").strip()
+    if text.startswith("/"):
+        return message
+    kind = ("фото" if message.get("photo") else "файл" if message.get("document") else
+            "видео" if message.get("video") else "")
+    if kind:
+        doc = message.get("document") or message.get("video") or {}
+        label = f"{kind} «{doc['file_name']}»" if doc.get("file_name") else kind
+        text = f"{text}\n(вложение в Telegram: {label})" if text else f"Вложение в Telegram: {label}"
+    if message.get("forward_origin") or message.get("forward_date") or message.get("forward_from"):
+        who = _forward_name(message)
+        text = f"Переслано от {who}: {text}" if text else f"Переслано от {who}"
+    return {**message, "text": text, "caption": None} if text else message
+
+
 async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
                   secretary=None, clock=None, transcriber=None) -> dict:
     """Голосовые превращаются в текст и идут дальше как обычные сообщения."""
+    message = _decorate(message)
     voice = message.get("voice") or message.get("audio") or message.get("video_note")
     text = (message.get("text") or message.get("caption") or "").strip()
     if not voice or text:

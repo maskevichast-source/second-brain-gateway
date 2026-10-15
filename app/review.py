@@ -251,3 +251,66 @@ def format_health(notes: list[VaultNote], today: date) -> str:
     score, issues = build_health(notes, today)
     head = f"Здоровье базы: {score}/100 (заметок: {len(notes)})"
     return head + ("\n" + "\n".join(f"• {i}" for i in issues) if issues else "\nЗамечаний нет.")
+
+
+# ---------- слияние дублей: только предпросмотр, ничего не удаляется ----------
+
+def find_duplicates(notes: list[VaultNote]) -> list[list[VaultNote]]:
+    """Группы похожих записей: тот же тип и название, та же ссылка, или человек, чьё имя входит в имя другого."""
+    groups: list[list[VaultNote]] = []
+    placed: set[int] = set()
+
+    def add(members: list[VaultNote]) -> None:
+        fresh = [n for n in members if n.index not in placed]
+        if len(members) > 1 and len(fresh) > 1:
+            groups.append(sorted(fresh, key=lambda n: (n.created or "", n.index)))
+            placed.update(n.index for n in fresh)
+
+    by_title: dict[tuple[str, str], list[VaultNote]] = {}
+    by_url: dict[str, list[VaultNote]] = {}
+    for n in notes:
+        key = _norm(n.title)
+        if key:
+            by_title.setdefault((n.type, key), []).append(n)
+        url = str(n.get("source_url")).strip().lower().rstrip("/")
+        if url:
+            by_url.setdefault(url, []).append(n)
+    for members in by_title.values():
+        add(members)
+    for members in by_url.values():
+        add(members)
+    people = [n for n in notes if n.type == "person" and n.index not in placed and _norm(n.title)]
+    for a in people:
+        if a.index in placed:
+            continue
+        a_tokens = set(_norm(a.title).split())
+        twins = [a]
+        for b in people:
+            if b is a or b.index in placed:
+                continue
+            b_tokens = set(_norm(b.title).split())
+            if len(a_tokens) != len(b_tokens) and (a_tokens <= b_tokens or b_tokens <= a_tokens):
+                twins.append(b)
+        add(twins)
+    return groups
+
+
+def _filled(n: VaultNote) -> int:
+    return sum(1 for value in n.front.values() if value not in ("", None, [], {}))
+
+
+def format_merge(notes: list[VaultNote]) -> str:
+    groups = find_duplicates(notes)
+    if not groups:
+        return "Дублей не нашёл."
+    rows = [f"Похожих групп: {len(groups)}. Ничего не удаляю: открой записи в Obsidian, перенеси нужное в главную и удали лишнее сам."]
+    for i, group in enumerate(groups[:8], 1):
+        keep = max(group, key=lambda n: (_filled(n), -(n.index)))
+        kind = TYPES[group[0].type].name.lower() if group[0].type in TYPES else group[0].type
+        rows += ["", f"{i}. {kind}:"]
+        for n in group:
+            mark = "оставить главной" if n is keep else "влить в главную"
+            rows.append(f"• «{n.title}» от {(n.created or '?')[:10]}, заполнено полей: {_filled(n)} — {mark}")
+    if len(groups) > 8:
+        rows += ["", f"…и ещё групп: {len(groups) - 8}."]
+    return "\n".join(rows)

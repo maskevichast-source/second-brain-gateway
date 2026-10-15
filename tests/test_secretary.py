@@ -163,3 +163,20 @@ def test_week_review_counts_diary_days():
         vault_note("День 2", type="journal", created="2026-10-10T21:00"),
         vault_note("Давно", type="journal", created="2026-09-01T21:00")))
     assert "Дневник: записи за 2 из 7" in build_week_review(notes, FIXED_NOW)
+
+
+def test_merge_preview_lists_duplicates_without_deleting():
+    from app.review import format_merge
+    from app.vault import load_notes
+    from .conftest import vault_note
+    notes = load_notes("\n".join([
+        vault_note("Серик Ахметов", type="person", created="2026-09-01", phone='"+7 700"'),
+        vault_note("Серик", type="person", created="2026-10-01"),
+        vault_note("Фильм Дюна", type="media", created="2026-09-01"),
+        vault_note("фильм  дюна", type="media", created="2026-10-01"),
+        vault_note("Уникальная", type="note"),
+    ]))[0]
+    text = format_merge(notes)
+    assert "Похожих групп: 2" in text and "Ничего не удаляю" in text
+    assert "«Серик Ахметов»" in text and "оставить главной" in text
+    assert format_merge(notes[4:]) == "Дублей не нашёл."
