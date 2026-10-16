@@ -36,7 +36,8 @@ HELP = (
     "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
     "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
     "• /people — кого я знаю. /status — очередь, срез, сбои. /sync — состояние среза, /forget — стереть срез, /backup — файл с копией профиля и среза.\n\n"
-    "Голосовые сообщения расшифровываю (если подключён сервис речи, README часть 10). Фото пока не принимаю: преврати в текст, на iPhone есть «Скопировать текст» с фото."
+    "Голосовые сообщения расшифровываю (если подключён сервис речи, README часть 10). PDF с текстом читаю и записываю как обычную запись. "
+    "Фото и сканы сохраняю с подписью; текст с картинки распознаю, только если включено (VISION_MODEL), иначе честно скажу, что не распознан."
 )
 
 Processor = Callable[..., Awaitable[dict]]
@@ -84,7 +85,7 @@ def _learn_people(db: Database, response: dict) -> None:
 
 async def handle_update(
     update: dict, *, settings: Settings, db: Database, process: Processor, secretary=None, clock=None, transcriber=None,
-    backup_sender=None,
+    backup_sender=None, file_fetcher=None, vision=None,
 ) -> dict | None:
     """Возвращает ответ для Telegram (метод sendMessage) или None, если отвечать не нужно."""
     callback = update.get("callback_query")
@@ -116,7 +117,8 @@ async def handle_update(
             return cached
 
     reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process,
-                          secretary=secretary, clock=clock, transcriber=transcriber, backup_sender=backup_sender)
+                          secretary=secretary, clock=clock, transcriber=transcriber, backup_sender=backup_sender,
+                          file_fetcher=file_fetcher, vision=vision)
     if dedupe_key and reply:
         db.save(capture_id=dedupe_key, revision=1, response=reply)
     return reply
@@ -304,8 +306,75 @@ def _decorate(message: dict) -> dict:
     return {**message, "text": text, "caption": None} if text else message
 
 
+MAX_NOTICE = 3900
+
+
+async def _attachment(message: dict, settings: Settings, fetcher, vision) -> tuple[dict, str]:
+    """PDF с текстовым слоем превращается в текст записи; картинки по возможности распознаются.
+
+    Возвращает (сообщение для дальнейшей обработки, честная пометка для ответа пользователю).
+    """
+    from . import files
+
+    doc = message.get("document") or {}
+    caption = (message.get("caption") or message.get("text") or "").strip()
+    if caption.startswith("/"):
+        return message, ""
+    private, plain = split_private(caption)
+    name = str(doc.get("file_name") or "")
+    mime = str(doc.get("mime_type") or "")
+    if doc and (mime == "application/pdf" or name.lower().endswith(".pdf")):
+        if fetcher is None:
+            return message, "ℹ️ Читать PDF не могу: на сервере нет токена бота. Сохранил запись с подписью и пометкой."
+        data = await fetcher(doc.get("file_id", ""))
+        if data is None:
+            return message, "⚠️ Не смог скачать PDF (слишком большой или Telegram не ответил). Сохранил запись с подписью и пометкой."
+        text = files.extract_pdf_text(data)
+        if not text:
+            return message, "⚠️ Текст из PDF не извлёкся (скан без текстового слоя, пароль или битый файл). Сохранил запись с подписью и пометкой."
+        head = (plain + "\n\n" if plain else "") + f"Источник: PDF: {name or 'без имени'}\n\n"
+        room = max(500, settings.max_content_chars - len(head) - 60)
+        cut = text[:min(room, files.MAX_PDF_CHARS)]
+        truncated = len(text) > len(cut)
+        content = head + cut + ("\n\n(текст PDF обрезан)" if truncated else "")
+        content = "! " + content if private else content
+        notice = f"📄 Прочитал PDF «{name or 'без имени'}»: {len(cut)} симв." + (", остальное обрезал." if truncated else ".")
+        return {**message, "text": content, "caption": None, "document": None}, notice
+    is_image = bool(message.get("photo")) or mime.startswith("image/")
+    if not is_image:
+        return message, ""
+    sorry = "🖼 Текст с картинки не распознан: сохранил подпись и пометку о вложении."
+    if private:
+        return message, sorry + " (В режиме «!» картинки никуда не отправляются.)"
+    if vision is None or fetcher is None:
+        return message, sorry
+    photos = message.get("photo") or []
+    file_id = (photos[-1] if photos else doc).get("file_id", "")
+    data = await fetcher(file_id)
+    text = await vision(data, mime or "image/jpeg") if data else None
+    if not text:
+        return message, sorry
+    label = "фото" if photos else f"файл «{name}»" if name else "картинка"
+    content = (caption + "\n" if caption else "") + (
+        f"(вложение в Telegram: {label})\nТекст с картинки (распознан ИИ, возможны ошибки): {text}")
+    return {**message, "text": content, "caption": None, "photo": None, "document": None}, \
+        "🖼 Текст с картинки распознан ИИ: проверь его в заметке."
+
+
 async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
-                  secretary=None, clock=None, transcriber=None, backup_sender=None) -> dict:
+                  secretary=None, clock=None, transcriber=None, backup_sender=None, file_fetcher=None,
+                  vision=None) -> dict:
+    """Вложения читаются (PDF, картинки), затем обычная обработка; к ответу добавляется честная пометка."""
+    message, notice = await _attachment(message, settings, file_fetcher, vision)
+    reply = await _answer_core(message, chat_id, update_id, settings=settings, db=db, process=process,
+                               secretary=secretary, clock=clock, transcriber=transcriber, backup_sender=backup_sender)
+    if notice and reply.get("method") == "sendMessage":
+        reply = {**reply, "text": (str(reply.get("text", "")) + "\n" + notice)[:4000]}
+    return reply
+
+
+async def _answer_core(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database,
+                       process: Processor, secretary=None, clock=None, transcriber=None, backup_sender=None) -> dict:
     """Голосовые превращаются в текст и идут дальше как обычные сообщения."""
     message = _decorate(message)
     voice = message.get("voice") or message.get("audio") or message.get("video_note")

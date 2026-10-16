@@ -42,6 +42,7 @@ class Settings:
     stt_api_key: str = field(default="", repr=False)
     stt_base_url: str = "https://api.groq.com/openai/v1"
     stt_model: str = "whisper-large-v3-turbo"
+    vision_model: str = ""          # пусто: распознавание текста на картинках выключено
 
 
 def load_settings() -> Settings:
@@ -90,4 +91,5 @@ def load_settings() -> Settings:
         stt_api_key=os.environ.get("STT_API_KEY", "").strip(),
         stt_base_url=os.environ.get("STT_BASE_URL", "https://api.groq.com/openai/v1").strip().rstrip("/"),
         stt_model=os.environ.get("STT_MODEL", "whisper-large-v3-turbo").strip(),
+        vision_model=os.environ.get("VISION_MODEL", "").strip(),
     )

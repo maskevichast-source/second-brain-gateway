@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import ada as ada_module
 from . import ask as ask_module
+from . import files as files_module
 from . import monitor as monitor_module
 from . import review as review_module
 from . import scheduler as scheduler_module
@@ -132,6 +133,8 @@ def create_app(
     expand_llm: Callable[..., Awaitable] | None = None,
     backup_sender: Callable[..., Awaitable] | None = None,
     alert_sender: Callable[..., Awaitable] | None = None,
+    file_fetcher: Callable[..., Awaitable] | None = None,
+    vision: Callable[..., Awaitable] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     transcriber_given = transcriber is not None
@@ -149,6 +152,10 @@ def create_app(
         backup_sender = scheduler_module.telegram_document_sender(settings)
     if alert_sender is None and settings.telegram_bot_token:
         alert_sender = scheduler_module.telegram_sender(settings)
+    if file_fetcher is None and settings.telegram_bot_token:
+        file_fetcher = lambda file_id: files_module.fetch_file(settings, file_id)  # noqa: E731
+    if vision is None and files_module.vision_enabled(settings):
+        vision = lambda data, mime: files_module.describe_image(settings, data, mime)  # noqa: E731
     monitor_module.MONITOR.configure(db, alert_sender, settings.telegram_allowed_ids)
     limiter = RateLimiter(settings.rate_limit_per_minute)
 
@@ -308,7 +315,7 @@ def create_app(
         try:
             reply = await handle_update(update, settings=settings, db=db, process=process, secretary=secretary, clock=clock,
                                        transcriber=transcriber if stt_module.configured(settings) or transcriber_given else None,
-                                       backup_sender=backup_sender)
+                                       backup_sender=backup_sender, file_fetcher=file_fetcher, vision=vision)
         except Exception as exc:  # noqa: BLE001 — Telegram не должен засыпать нас повторами
             logger.error("telegram: ошибка обработки (%s)", type(exc).__name__)
             monitor_module.failure("webhook", exc)
