@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from . import monitor
 from .config import Settings
 from .llm import WEEKDAYS, _neutralize
 from .textutil import one_line, parse_date
@@ -332,6 +333,7 @@ async def ask_llm(
     owns = http_client is None
     client = http_client or httpx.AsyncClient(timeout=settings.llm_timeout)
     try:
+        last_error = None
         for attempt in range(1, attempts + 1):
             try:
                 response = await client.post(url, json=body, headers=headers, timeout=settings.llm_timeout)
@@ -342,8 +344,10 @@ async def ask_llm(
                 raise ValueError("пустой ответ")
             except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
                 logger.warning("ASK LLM: попытка %d/%d не удалась (%s)", attempt, attempts, type(exc).__name__)
+                last_error = exc
                 if attempt < attempts:
                     await asyncio.sleep(retry_delay)
+        monitor.failure("deepseek", last_error)
         return None
     finally:
         if owns:
@@ -378,6 +382,7 @@ async def expand_query(settings: Settings, question: str, http_client: httpx.Asy
         return [w for w in words if isinstance(w, str)][:15] if isinstance(words, list) else []
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
         logger.warning("EXPAND: не удалось (%s)", type(exc).__name__)
+        monitor.failure("deepseek", exc)
         return []
     finally:
         if owns:

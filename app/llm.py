@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from . import monitor
 from .config import Settings
 from .prompt import build_system_prompt
 
@@ -176,6 +177,7 @@ async def structure_capture(
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=settings.llm_timeout)
     try:
+        last_error = None
         for attempt in range(1, attempts + 1):
             try:
                 response = await client.post(url, json=body, headers=headers, timeout=settings.llm_timeout)
@@ -185,8 +187,10 @@ async def structure_capture(
             except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
                 # Текст заметки в логи не пишем — только тип ошибки.
                 logger.warning("LLM: попытка %d/%d не удалась (%s)", attempt, attempts, type(exc).__name__)
+                last_error = exc
                 if attempt < attempts:
                     await asyncio.sleep(retry_delay)
+        monitor.failure("deepseek", last_error)
         return None
     finally:
         if owns_client:

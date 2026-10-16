@@ -15,6 +15,7 @@ import httpx
 from . import ada as ada_module
 from . import ask as ask_module
 from . import diary
+from . import monitor
 from . import review as review_module
 from . import snapshot as snapshot_module
 from .config import Settings
@@ -157,11 +158,31 @@ def telegram_sender(settings: Settings):
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage", json=body)
+            if r.status_code != 200:
+                monitor.failure("telegram", RuntimeError(f"HTTP {r.status_code}"))
             return r.status_code == 200
         except httpx.HTTPError as exc:
             logger.warning("scheduler: Telegram недоступен (%s)", type(exc).__name__)
+            monitor.failure("telegram", exc)
             return False
     return send
+
+
+def telegram_document_sender(settings: Settings):
+    """Отправка файла в личку (для /backup). Токен бота нужен только здесь, в логи он не пишется."""
+    async def send_document(chat_id: int, filename: str, data: bytes, caption: str = "") -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendDocument",
+                                      data={"chat_id": str(chat_id), "caption": caption[:900]},
+                                      files={"document": (filename, data, "application/json")})
+            if r.status_code != 200:
+                monitor.failure("telegram", RuntimeError(f"HTTP {r.status_code}"))
+            return r.status_code == 200
+        except httpx.HTTPError as exc:
+            monitor.failure("telegram", exc)
+            return False
+    return send_document
 
 
 async def run_loop(db: Database, settings: Settings, clock, send, interval: float = 60.0) -> None:
@@ -170,4 +191,9 @@ async def run_loop(db: Database, settings: Settings, clock, send, interval: floa
             await tick(db, settings, clock(), send)
         except Exception as exc:  # noqa: BLE001 — цикл не должен падать
             logger.error("scheduler: ошибка (%s)", type(exc).__name__)
+            monitor.failure("scheduler", exc)
+        try:
+            await monitor.MONITOR.flush()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("scheduler: ошибка монитора (%s)", type(exc).__name__)
         await asyncio.sleep(interval)

@@ -85,7 +85,8 @@ def movie_result():
 
 @pytest.fixture
 def make_client(tmp_path):
-    def _make(llm=None, links=None, ask_llm=None, transcriber=None, expand_llm=None, **overrides):
+    def _make(llm=None, links=None, ask_llm=None, transcriber=None, expand_llm=None, backup_sender=None,
+               alert_sender=None, **overrides):
         settings = make_settings(tmp_path, **overrides)
         app = create_app(
             settings=settings,
@@ -95,6 +96,8 @@ def make_client(tmp_path):
             ask_llm=ask_llm,
             expand_llm=expand_llm,
             transcriber=transcriber,
+            backup_sender=backup_sender,
+            alert_sender=alert_sender,
         )
         return TestClient(app)
 

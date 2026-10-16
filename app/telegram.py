@@ -35,7 +35,7 @@ HELP = (
     "/brief Имя — что знать перед встречей, /budget — бюджет из «Ады».\n"
     "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
     "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
-    "• /people — кого я знаю. /status — сколько заметок ждут выгрузки. /sync — состояние среза, /forget — стереть срез.\n\n"
+    "• /people — кого я знаю. /status — очередь, срез, сбои. /sync — состояние среза, /forget — стереть срез, /backup — файл с копией профиля и среза.\n\n"
     "Голосовые сообщения расшифровываю (если подключён сервис речи, README часть 10). Фото пока не принимаю: преврати в текст, на iPhone есть «Скопировать текст» с фото."
 )
 
@@ -84,6 +84,7 @@ def _learn_people(db: Database, response: dict) -> None:
 
 async def handle_update(
     update: dict, *, settings: Settings, db: Database, process: Processor, secretary=None, clock=None, transcriber=None,
+    backup_sender=None,
 ) -> dict | None:
     """Возвращает ответ для Telegram (метод sendMessage) или None, если отвечать не нужно."""
     callback = update.get("callback_query")
@@ -115,7 +116,7 @@ async def handle_update(
             return cached
 
     reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process,
-                          secretary=secretary, clock=clock, transcriber=transcriber)
+                          secretary=secretary, clock=clock, transcriber=transcriber, backup_sender=backup_sender)
     if dedupe_key and reply:
         db.save(capture_id=dedupe_key, revision=1, response=reply)
     return reply
@@ -142,7 +143,7 @@ def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str) -> st
 
 
 async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
-                       secretary=None, clock=None) -> dict:
+                       secretary=None, clock=None, backup_sender=None) -> dict:
     now = clock() if clock else _now(settings)
     text = (message.get("text") or message.get("caption") or "").strip()
     if not text:
@@ -179,8 +180,10 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         count, synced = db.snapshot_info()
         when = f"последняя полная синхронизация: {synced[:16].replace('T', ' ')} UTC" if synced else "полной синхронизации ещё не было"
         return _reply(chat_id, f"В срезе заметок: {count}; {when}.")
+    if command == "/backup":
+        return await _backup_command(chat_id, db, now, backup_sender)
     if command == "/status":
-        return _reply(chat_id, f"Ждут выгрузки в хранилище: {db.pending_count()}")
+        return _reply(chat_id, _status_text(db))
     if command == "/people":
         known = db.known_people()
         if not known:
@@ -243,6 +246,34 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     return _reply(chat_id, summary)
 
 
+def _status_text(db: Database) -> str:
+    from . import monitor
+
+    count, synced = db.snapshot_info()
+    last = db.snapshot_last_update()
+    stamp = lambda v: v[:16].replace("T", " ") + " UTC" if v else "ещё не было"  # noqa: E731
+    rows = [f"Ждут выгрузки в хранилище: {db.pending_count()}",
+            f"Служебных записей в очереди (закрыть дело): {db.service_count()}",
+            f"В срезе заметок: {count}",
+            f"Последний успешный срез: полная синхронизация {stamp(synced)}; последняя запись в срез {stamp(last)}"]
+    failures = len(monitor.MONITOR.recent())
+    rows.append(f"Сбоев за последний час: {failures}" if failures else "Сбоев за последний час нет")
+    return "\n".join(rows)
+
+
+async def _backup_command(chat_id: int, db: Database, now, backup_sender) -> dict:
+    from . import backup
+
+    if backup_sender is None:
+        return _reply(chat_id, "Для /backup на сервере нужен токен бота (TELEGRAM_BOT_TOKEN, README часть 5): "
+                               "файл я присылаю в личку.")
+    filename, data = backup.build_backup(db, now)
+    caption = "Резервная копия: профиль, настройки и срез хранилища. Текстов заметок и секретов в файле нет."
+    if await backup_sender(chat_id, filename, data, caption):
+        return _reply(chat_id, f"Отправил файл {filename} ({len(data) // 1024 + 1} КБ).")
+    return _reply(chat_id, "Не получилось отправить файл, попробуй позже.")
+
+
 def _forward_name(message: dict) -> str:
     origin = message.get("forward_origin") or {}
     if origin:
@@ -274,14 +305,14 @@ def _decorate(message: dict) -> dict:
 
 
 async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
-                  secretary=None, clock=None, transcriber=None) -> dict:
+                  secretary=None, clock=None, transcriber=None, backup_sender=None) -> dict:
     """Голосовые превращаются в текст и идут дальше как обычные сообщения."""
     message = _decorate(message)
     voice = message.get("voice") or message.get("audio") or message.get("video_note")
     text = (message.get("text") or message.get("caption") or "").strip()
     if not voice or text:
         return await _answer_text(message, chat_id, update_id, settings=settings, db=db, process=process,
-                                  secretary=secretary, clock=clock)
+                                  secretary=secretary, clock=clock, backup_sender=backup_sender)
     if transcriber is None:
         return _reply(chat_id, "Голосовые пока не включены: нужен ключ сервиса распознавания речи (STT_API_KEY, README, часть 10). "
                                "Пока можно продиктовать текст клавиатурой iPhone (значок микрофона).")

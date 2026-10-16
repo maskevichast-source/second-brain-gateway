@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from . import monitor
 from .config import Settings
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,7 @@ async def fetch_summary(settings: Settings, http_client: httpx.AsyncClient | Non
         text = format_summary(response.json())
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("ADA: сводка недоступна (%s)", type(exc).__name__)
+        monitor.failure("ada", exc)
         return ""
     finally:
         if owns:

@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import ada as ada_module
 from . import ask as ask_module
+from . import monitor as monitor_module
 from . import review as review_module
 from . import scheduler as scheduler_module
 from . import snapshot as snapshot_module
@@ -129,6 +130,8 @@ def create_app(
     transcriber: Callable[..., Awaitable] | None = None,
     ask_llm: Callable[..., Awaitable] | None = None,
     expand_llm: Callable[..., Awaitable] | None = None,
+    backup_sender: Callable[..., Awaitable] | None = None,
+    alert_sender: Callable[..., Awaitable] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     transcriber_given = transcriber is not None
@@ -142,6 +145,11 @@ def create_app(
     db = Database(settings.data_dir / "brain.db", ttl_hours=settings.response_ttl_hours,
                   outbox_ttl_days=settings.outbox_ttl_days)
     db.init()
+    if backup_sender is None and settings.telegram_bot_token:
+        backup_sender = scheduler_module.telegram_document_sender(settings)
+    if alert_sender is None and settings.telegram_bot_token:
+        alert_sender = scheduler_module.telegram_sender(settings)
+    monitor_module.MONITOR.configure(db, alert_sender, settings.telegram_allowed_ids)
     limiter = RateLimiter(settings.rate_limit_per_minute)
 
     @asynccontextmanager
@@ -299,9 +307,12 @@ def create_app(
             return {}
         try:
             reply = await handle_update(update, settings=settings, db=db, process=process, secretary=secretary, clock=clock,
-                                       transcriber=transcriber if stt_module.configured(settings) or transcriber_given else None)
+                                       transcriber=transcriber if stt_module.configured(settings) or transcriber_given else None,
+                                       backup_sender=backup_sender)
         except Exception as exc:  # noqa: BLE001 — Telegram не должен засыпать нас повторами
             logger.error("telegram: ошибка обработки (%s)", type(exc).__name__)
+            monitor_module.failure("webhook", exc)
+            await monitor_module.MONITOR.flush()
             message = update.get("message") if isinstance(update, dict) else None
             chat_id = ((message or {}).get("chat") or {}).get("id")
             if isinstance(chat_id, int) and settings.telegram_allowed_ids:

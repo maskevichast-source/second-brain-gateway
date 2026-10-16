@@ -244,6 +244,13 @@ class Database:
                          (f"cfg_{key}", value, datetime.now(timezone.utc).isoformat(timespec="seconds")))
             conn.commit()
 
+    def settings_all(self) -> dict:
+        """Настройки бота (время сводок и т.п.) без служебных отметок напоминаний."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT key, value FROM profile WHERE key LIKE 'cfg\\_%' ESCAPE '\\' "
+                                "AND key NOT LIKE 'cfg\\_rem\\_%' ESCAPE '\\' ORDER BY key").fetchall()
+        return {row["key"][4:]: row["value"] for row in rows}
+
     # ---------- срез хранилища (короткие свойства заметок, без текстов) ----------
 
     def snapshot_put(self, rows: list[tuple[str, dict]], max_rows: int = 20000) -> None:
@@ -281,6 +288,11 @@ class Database:
             count = conn.execute("SELECT COUNT(*) FROM snapshot").fetchone()[0]
             row = conn.execute("SELECT updated_at FROM profile WHERE key = 'snapshot_synced'").fetchone()
         return count, (row["updated_at"] if row else "")
+
+    def snapshot_last_update(self) -> str:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT MAX(updated_at) FROM snapshot").fetchone()
+        return row[0] or ""
 
     def snapshot_stamp(self) -> tuple:
         """Дешёвая «отметка версии» среза: меняется при добавлении, замене и удалении строк."""

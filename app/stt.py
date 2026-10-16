@@ -9,6 +9,7 @@ import logging
 
 import httpx
 
+from . import monitor
 from .config import Settings
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ async def transcribe(settings: Settings, file_id: str, http_client: httpx.AsyncC
         return text or None
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         logger.warning("stt: не удалось расшифровать (%s)", type(exc).__name__)
+        monitor.failure("stt", exc)
         return None
     finally:
         if owns:
