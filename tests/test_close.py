@@ -109,4 +109,4 @@ def test_vault_sync_is_stdlib_only():
     tree = ast.parse((pathlib.Path(vault_sync.__file__)).read_text(encoding="utf-8"))
     mods = {n.module.split(".")[0] if isinstance(n, ast.ImportFrom) else a.name.split(".")[0]
             for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in (getattr(n, "names", None) or [n])}
-    assert mods <= {"__future__", "argparse", "json", "os", "sys", "time", "urllib", "pathlib"}
+    assert mods <= {"__future__", "argparse", "json", "os", "sys", "time", "urllib", "pathlib", "vault_organize", "vault_people"}   # два последних лежат рядом, тоже stdlib

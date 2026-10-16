@@ -10,6 +10,9 @@
 Файл сначала записывается на диск и только потом подтверждается на сервере, поэтому заметка не потеряется.
 Существующие файлы не перезаписываются.
 
+После каждой выгрузки запускаются vault_organize.py (раскладка по папкам и связи между заметками) и vault_people.py
+(карточки людей), если лежат рядом. Отключить: --no-organize.
+
 Кроме заметок, очередь содержит служебные записи «закрыть дело» (кнопка «Сделано» в Telegram): скрипт находит
 заметку по названию (и дате создания) и меняет в ней status. Файл не удаляется; если заметка не найдена,
 подходит несколько или статус уже закрыт, запись просто пропускается и подтверждается на сервере.
@@ -182,6 +185,29 @@ SERVICE_RU = {"closed": "дело закрыто", "already": "уже закры
               "ambiguous": "подходит несколько заметок, пропускаю", "invalid": "непонятная запись, пропускаю"}
 
 
+def organize_after_sync(vault: Path, fresh: bool = False) -> None:
+    """Раскладка и связи для новых заметок (tools/vault_organize.py) и карточки людей. Сбой не мешает очереди."""
+    try:
+        import vault_organize
+        report = vault_organize.organize(vault, settle=0 if fresh else vault_organize.SETTLE_SECONDS)
+        for key, title in (("filed", "разложено"), ("archived", "в архив"), ("linked", "связи"), ("errors", "ошибка")):
+            for row in report.get(key, []):
+                print(f"  {title}: {row}")
+    except ImportError:
+        return                                  # файл организатора не положили рядом: просто пропускаем
+    except Exception as exc:  # noqa: BLE001 - организатор не должен ронять синхронизацию
+        print(f"Организатор заметок не сработал: {type(exc).__name__}")
+    try:
+        import vault_people
+        created = vault_people.run(vault)["created"]
+        for name in created:
+            print(f"  карточка человека: {name}")
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"Карточки людей не обновились: {type(exc).__name__}")
+
+
 def sync_once(url: str, token: str, vault: Path) -> int:
     saved = 0
     while True:
@@ -212,6 +238,7 @@ def main(argv=None) -> int:
     parser.add_argument("--vault", required=True, help="папка хранилища SecondBrain")
     parser.add_argument("--token", default=os.environ.get("SECOND_BRAIN_TOKEN", ""))
     parser.add_argument("--loop", type=int, default=0, help="повторять каждые N секунд (0 — один раз)")
+    parser.add_argument("--no-organize", action="store_true", help="не раскладывать заметки и не связывать их")
     args = parser.parse_args(argv)
     if not args.token:
         print("Не задан токен: переменная SECOND_BRAIN_TOKEN или параметр --token")
@@ -223,6 +250,8 @@ def main(argv=None) -> int:
     while True:
         try:
             saved = sync_once(args.url, args.token, vault)
+            if not args.no_organize:
+                organize_after_sync(vault, fresh=bool(saved))
             stamp = time.strftime("%H:%M:%S")
             print(f"[{stamp}] новых заметок: {saved}")
         except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
