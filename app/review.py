@@ -83,10 +83,12 @@ def build_week_review(notes: list[VaultNote], now: datetime, ada_text: str = "")
         out += ["", "Список «хочу»: " + ", ".join(
             f"{TYPES[t].name.lower()} — {c}" for t, c in backlog.most_common())]
     inbox = [n for n in notes if str(n.get("stage")) == "inbox"]
-    old_bookmarks = [n for n in notes if n.type == "bookmark" and str(n.get("status")) != "разобрано"
-                     and (_created(n) or today) <= today - timedelta(days=14)]
-    if inbox or old_bookmarks:
-        out += ["", f"Разобрать: во входящих {len(inbox)}, неразобранных закладок старше 2 недель {len(old_bookmarks)}."]
+    stale_marks = old_bookmarks(notes, today)
+    if inbox or stale_marks:
+        out += ["", f"Разобрать: во входящих {len(inbox)}, неразобранных закладок старше 2 недель {len(stale_marks)}."]
+    marks_text = format_old_bookmarks(notes, today)
+    if marks_text:
+        out += ["", marks_text]
     if notes:
         score, issues = build_health(notes, today)
         if issues:
@@ -205,6 +207,33 @@ def format_resurface(items: list[VaultNote], today: date) -> str:
     return "\n".join(rows)
 
 
+# ---------- закладки без разбора: детерминированный отчёт, без ИИ ----------
+
+BOOKMARK_STALE_DAYS = 14
+
+
+def old_bookmarks(notes: list[VaultNote], today: date, days: int = BOOKMARK_STALE_DAYS) -> list[tuple[int, VaultNote]]:
+    """Закладки не в статусе «разобрано» старше `days` дней: (возраст в днях, заметка), самые старые первыми."""
+    found = []
+    for n in notes:
+        created = _created(n)
+        if n.type == "bookmark" and str(n.get("status")) != "разобрано" and created and (today - created).days >= days:
+            found.append(((today - created).days, n))
+    found.sort(key=lambda item: (-item[0], item[1].title))
+    return found
+
+
+def format_old_bookmarks(notes: list[VaultNote], today: date, limit: int = 5) -> str:
+    found = old_bookmarks(notes, today)
+    if not found:
+        return ""
+    rows = [f"Закладки без разбора старше {BOOKMARK_STALE_DAYS} дней: {len(found)}. Самые старые:"]
+    for age, n in found[:limit]:
+        rows.append(f"• «{one_line(n.title, 70)}» — {age} дн.")
+    rows.append("Разбери вручную: открой закладку, поменяй тип на нужный или поставь статус «разобрано».")
+    return "\n".join(rows)
+
+
 # ---------- проверка здоровья базы (дубли, неразобранное, зависшие дела) ----------
 
 def _norm(text: str) -> str:
@@ -240,6 +269,11 @@ def build_health(notes: list[VaultNote], today: date) -> tuple[int, list[str]]:
     if old_inbox:
         penalty += min(20, len(old_inbox))
         issues.append(f"Во входящих дольше 2 недель: {len(old_inbox)}.")
+    marks = old_bookmarks(notes, today)
+    if marks:
+        penalty += min(10, len(marks))
+        issues.append(f"Закладки без разбора старше {BOOKMARK_STALE_DAYS} дней: {len(marks)}. Самые старые: "
+                      + "; ".join(f"«{n.title}» ({age} дн.)" for age, n in marks[:3]))
     bare = [n for n in notes if n.type == "person" and not (n.get("relation") or n.get("relation_group") or n.get("company"))]
     if bare:
         penalty += min(10, len(bare))
@@ -299,18 +333,78 @@ def _filled(n: VaultNote) -> int:
     return sum(1 for value in n.front.values() if value not in ("", None, [], {}))
 
 
+_SKIP_DIFF = frozenset({"schema", "created", "capture_id", "confidence", "source", "stage", "ai_filled", "title", "summary"})
+
+
+def _diff_fields(keep: VaultNote, other: VaultNote) -> list[str]:
+    """Свойства, которые есть у `other`, но пусты или другие в главной: их стоит перенести руками."""
+    out = []
+    for key, value in other.front.items():
+        if key in _SKIP_DIFF or value in ("", None, [], {}):
+            continue
+        if keep.front.get(key) in ("", None, [], {}) or keep.front.get(key) != value:
+            out.append(key)
+    return out
+
+
+def _main_of(group: list[VaultNote]) -> VaultNote:
+    return max(group, key=lambda n: (_filled(n), -(n.index)))
+
+
 def format_merge(notes: list[VaultNote]) -> str:
     groups = find_duplicates(notes)
     if not groups:
         return "Дублей не нашёл."
-    rows = [f"Похожих групп: {len(groups)}. Ничего не удаляю: открой записи в Obsidian, перенеси нужное в главную и удали лишнее сам."]
+    rows = [f"Похожих групп: {len(groups)}. Ничего не удаляю и не сливаю сам. По каждой группе: что оставить главной, "
+            "что объединить с ней. Файл-подсказку для ручного слияния подготовит команда /merge НОМЕР."]
     for i, group in enumerate(groups[:8], 1):
-        keep = max(group, key=lambda n: (_filled(n), -(n.index)))
+        keep = _main_of(group)
         kind = TYPES[group[0].type].name.lower() if group[0].type in TYPES else group[0].type
         rows += ["", f"{i}. {kind}:"]
         for n in group:
-            mark = "оставить главной" if n is keep else "влить в главную"
-            rows.append(f"• «{n.title}» от {(n.created or '?')[:10]}, заполнено полей: {_filled(n)} — {mark}")
+            if n is keep:
+                rows.append(f"• ✅ оставить главной: «{n.title}» от {(n.created or '?')[:10]}, заполнено полей: {_filled(n)}")
+            else:
+                more = _diff_fields(keep, n)
+                extra = f", перенести: {', '.join(more[:6])}" if more else ", переносить нечего"
+                rows.append(f"• ➕ объединить с главной: «{n.title}» от {(n.created or '?')[:10]}, "
+                            f"заполнено полей: {_filled(n)}{extra}")
+        rows.append(f"  Подсказка: /merge {i}")
     if len(groups) > 8:
         rows += ["", f"…и ещё групп: {len(groups) - 8}."]
     return "\n".join(rows)
+
+
+def build_merge_hint(notes: list[VaultNote], number: int, now: datetime) -> tuple[str, dict | None]:
+    """Файл-подсказка для ручного слияния группы №number. Возвращает (ответ боту, файл для очереди или None)."""
+    from .frontmatter import Raw, dump
+    from .textutil import file_suffix, slugify
+
+    groups = find_duplicates(notes)
+    if not groups:
+        return "Дублей не нашёл, подсказка не нужна.", None
+    if not 1 <= number <= min(len(groups), 8):
+        return f"Нет такой группы. Выбери номер от 1 до {min(len(groups), 8)} (список: /merge).", None
+    group = groups[number - 1]
+    keep = _main_of(group)
+    others = [n for n in group if n is not keep]
+    head = dump([
+        ("schema", 1), ("title", f"Слияние дублей: {one_line(keep.title, 60)}"),
+        ("summary", f"Подсказка для ручного слияния: {len(group)} похожих записей"),
+        ("created", Raw(now.strftime("%Y-%m-%dT%H:%M"))), ("type", "note"), ("stage", "inbox"), ("area", "разное"),
+        ("tags", ["merge-hint"]), ("source", "telegram"),
+    ])
+    body = ["Подсказка составлена по свойствам заметок (тексты на сервере не хранятся). Ничего не удалено и не изменено.",
+            "", f"## Оставить главной", f"- [[{keep.title}]] от {(keep.created or '?')[:10]}, заполнено полей: {_filled(keep)}",
+            "", "## Объединить с главной"]
+    for n in others:
+        more = _diff_fields(keep, n)
+        body.append(f"- [[{n.title}]] от {(n.created or '?')[:10]}, заполнено полей: {_filled(n)}"
+                    + (f". Перенести свойства: {', '.join(more)}" if more else ". Переносить в свойствах нечего"))
+    body += ["", "## Что сделать руками", "1. Открой главную заметку и сравни с остальными: перенеси недостающие факты из текста.",
+             "2. Проверь ссылки `[[...]]` на дубли в других заметках и поменяй их на главную.",
+             "3. Когда всё перенесено, сам удали или архивируй лишние заметки. Эту подсказку тоже можно удалить.", ""]
+    filename = f"{now:%Y-%m-%d}-{slugify('слияние ' + keep.title)}-{file_suffix(f'merge-{keep.title}-{now:%Y%m%d}')}.md"
+    file = {"filename": filename, "folder": "0-Inbox", "type": "note", "title": f"Слияние дублей: {keep.title}",
+            "markdown": head + "\n\n" + "\n".join(body)}
+    return f"Подготовил файл-подсказку «{file['title']}». Появится в 0-Inbox, когда ноутбук или телефон заберёт очередь.", file

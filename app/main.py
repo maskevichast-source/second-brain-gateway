@@ -154,6 +154,17 @@ def create_app(
         if task:
             task.cancel()
 
+    snap_cache: dict = {}
+
+    def snapshot_state():
+        """(заметки среза, индекс или None). Пересчитывается только когда срез изменился."""
+        stamp = db.snapshot_stamp()
+        if snap_cache.get("stamp") != stamp:
+            notes = snapshot_module.to_notes(db.snapshot_fronts())
+            snap_cache.update(stamp=stamp, notes=notes,
+                              index=ask_module.NoteIndex(notes) if len(notes) >= ask_module.INDEX_MIN_NOTES else None)
+        return snap_cache["notes"], snap_cache["index"]
+
     app = FastAPI(title="Second Brain Gateway", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
     async def process(
@@ -383,9 +394,14 @@ def create_app(
         if len(payload.corpus) > settings.max_corpus_chars:
             return _error(413, "Слишком много заметок в одном запросе"), None, None, 0
         if not payload.corpus.strip():          # присылать заметки не обязательно: берём срез на сервере
-            return None, payload, snapshot_module.to_notes(db.snapshot_fronts()), 0
+            return None, payload, snapshot_state()[0], 0
         notes, private = load_notes(payload.corpus)
         return None, payload, notes, private
+
+    def index_for(notes):
+        """Индекс среза годится, только если вопрос идёт по срезу на сервере, а не по присланному корпусу."""
+        cached, index = snapshot_state()
+        return index if notes is cached else None
 
     @app.post("/ask")
     async def ask(request: Request):
@@ -397,7 +413,7 @@ def create_app(
         result = await ask_module.answer_question(
             settings, notes, payload.question, now,
             llm=lambda cfg, **kw: ask_llm(cfg, **kw), ada_text=ada_text,
-            expander=expand_llm,
+            expander=expand_llm, index=index_for(notes),
         )
         logger.info("ask notes=%d used=%d omitted=%d private=%d fallback=%s qchars=%d ada=%s",
                     len(notes), result.used_notes, result.omitted, private, result.fallback,
@@ -475,7 +491,7 @@ def create_app(
         ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
         if kind == "budget":
             return ada_text or "Финансы «Ады» не подключены (см. README, часть 7)."
-        notes = snapshot_module.to_notes(db.snapshot_fronts())
+        notes, index = snapshot_state()
         if not notes:
             return ("Срез хранилища пуст. Запиши что-нибудь через бота или запусти на iPhone шорткат "
                     "«Синхронизировать» (README, часть 8).")
@@ -486,6 +502,13 @@ def create_app(
         if kind == "health":
             return review_module.format_health(notes, now.date())
         if kind == "merge":
+            if arg.strip().isdigit():
+                reply, file = review_module.build_merge_hint(notes, int(arg.strip()), now)
+                if file:
+                    seed = f"merge-{file['filename']}"
+                    if not db.enqueue(seed, [file]):
+                        reply = "Такую подсказку я уже готовил сегодня, она ждёт выгрузки или уже в хранилище."
+                return reply
             return review_module.format_merge(notes)
         if kind == "remember":
             back = review_module.format_resurface(review_module.pick_resurface(notes, now.date(), count=3, min_age=14), now.date())
@@ -494,7 +517,7 @@ def create_app(
             return review_module.build_brief(notes, arg, now, ada_text)
         result = await ask_module.answer_question(
             settings, notes, arg, now, llm=lambda cfg, **kw: ask_llm(cfg, **kw), ada_text=ada_text,
-            expander=expand_llm)
+            expander=expand_llm, index=index)
         text = result.answer
         if result.sources:
             text += "\n\nИсточники:\n" + "\n".join(f"• {t}" for t in result.sources[:8])

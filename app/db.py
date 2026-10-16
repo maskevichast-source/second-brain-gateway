@@ -282,6 +282,12 @@ class Database:
             row = conn.execute("SELECT updated_at FROM profile WHERE key = 'snapshot_synced'").fetchone()
         return count, (row["updated_at"] if row else "")
 
+    def snapshot_stamp(self) -> tuple:
+        """Дешёвая «отметка версии» среза: меняется при добавлении, замене и удалении строк."""
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT COUNT(*), MAX(updated_at), COALESCE(SUM(LENGTH(front)), 0) FROM snapshot").fetchone()
+        return tuple(row)
+
     def snapshot_clear(self) -> int:
         with closing(self._connect()) as conn:
             count = conn.execute("DELETE FROM snapshot").rowcount

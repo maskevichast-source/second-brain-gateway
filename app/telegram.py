@@ -33,7 +33,7 @@ HELP = (
     "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки.\n"
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
     "/brief Имя — что знать перед встречей, /budget — бюджет из «Ады».\n"
-    "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли и что с чем слить. /remember — вспомню старые идеи и хотелки.\n"
+    "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
     "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
     "• /people — кого я знаю. /status — сколько заметок ждут выгрузки. /sync — состояние среза, /forget — стереть срез.\n\n"
     "Голосовые сообщения расшифровываю (если подключён сервис речи, README часть 10). Фото пока не принимаю: преврати в текст, на iPhone есть «Скопировать текст» с фото."
@@ -160,8 +160,10 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
             return _reply(chat_id, "Эта команда пока недоступна.")
-        if command in ("/health", "/remember", "/merge"):
+        if command in ("/health", "/remember"):
             arg = ""
+        if command == "/merge":
+            arg = arg.split()[0] if arg.split() and arg.split()[0].isdigit() else ""
         if command == "/ask" and not arg:
             return _reply(chat_id, "Напиши вопрос после команды, например: /ask что я обещал Серику?")
         if command == "/brief" and not arg:

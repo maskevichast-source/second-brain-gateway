@@ -238,6 +238,56 @@ def select_lines(notes: list[VaultNote], question: str, budget: int,
     return [pairs[i] for i in chosen], len(pairs) - len(chosen)
 
 
+INDEX_MIN_NOTES = 500          # меньше заметок: отбор по словам и так мгновенный, индекс не нужен
+_WORD = re.compile(r"[\w-]+", re.UNICODE)
+
+
+def _stem(word: str) -> str:
+    return word[:4]
+
+
+class NoteIndex:
+    """Быстрый индекс среза по ключевым словам для /ask на тысячах заметок.
+
+    Строится из коротких свойств заметок (полных текстов на сервере нет) и живёт только в памяти.
+    Строки compact_line считаются один раз, а по вопросу оцениваются не все заметки, а только те,
+    где встречается слово с тем же началом (4 буквы). Бюджет ASK_BUDGET_CHARS соблюдается так же, как раньше.
+    """
+
+    def __init__(self, notes: list[VaultNote]):
+        self.notes = notes
+        self.lines = [compact_line(n) for n in notes]
+        self.total_chars = sum(len(line) + 1 for line in self.lines)
+        self.postings: dict[str, list[int]] = {}
+        for i, line in enumerate(self.lines):
+            seen = set()
+            for word in _WORD.findall(line.lower().split("|", 1)[-1]):
+                if len(word) >= 3 and _stem(word) not in seen:
+                    seen.add(_stem(word))
+                    self.postings.setdefault(_stem(word), []).append(i)
+
+    def select(self, question: str, budget: int,
+               extra_keys: list[str] | None = None) -> tuple[list[tuple[VaultNote, str]], int]:
+        if self.total_chars <= budget:
+            return list(zip(self.notes, self.lines)), 0
+        keys = list(dict.fromkeys(keywords(question) + list(extra_keys or [])))
+        candidates: set[int] = set()
+        for key in keys:
+            candidates.update(self.postings.get(_stem(key), ()))
+        scored = sorted(((-score(self.notes[i], keys, self.lines[i]), -i) for i in candidates))
+        ranked = [-j for _, j in scored]
+        ranked += [i for i in range(len(self.notes) - 1, -1, -1) if i not in candidates]   # остальные: свежие раньше
+        chosen, used = [], 0
+        for i in ranked:
+            cost = len(self.lines[i]) + 1
+            if used + cost > budget:
+                continue
+            chosen.append(i)
+            used += cost
+        chosen.sort()
+        return [(self.notes[i], self.lines[i]) for i in chosen], len(self.notes) - len(chosen)
+
+
 def build_ask_message(question: str, lines: list[str], now: datetime, timezone: str, ada_text: str = "") -> str:
     finance = ["<<<ФИНАНСЫ", _neutralize(ada_text), "ФИНАНСЫ>>>"] if ada_text else []
     return "\n".join([
@@ -352,13 +402,17 @@ def keyword_answer(pairs: list[tuple[VaultNote, str]], question: str, limit: int
 
 async def answer_question(
     settings: Settings, notes: list[VaultNote], question: str, now: datetime, llm=ask_llm, ada_text: str = "",
-    expander=None,
+    expander=None, index: NoteIndex | None = None,
 ) -> AskResult:
     extra: list[str] = []
-    if expander is not None and sum(len(compact_line(n)) + 1 for n in notes) > settings.ask_budget_chars:
+    total = index.total_chars if index else sum(len(compact_line(n)) + 1 for n in notes)
+    if expander is not None and total > settings.ask_budget_chars:
         # заметок больше бюджета: отбор по словам, поэтому расширяем вопрос синонимами
         extra = keywords(" ".join(await expander(settings, question)))
-    pairs, omitted = select_lines(notes, question, settings.ask_budget_chars, extra)
+    if index:
+        pairs, omitted = index.select(question, settings.ask_budget_chars, extra)
+    else:
+        pairs, omitted = select_lines(notes, question, settings.ask_budget_chars, extra)
     if not pairs:
         return AskResult("Хранилище пустое: заметок для ответа нет.", [], 0, 0, False)
     kwargs = {"ada_text": ada_text} if ada_text else {}
