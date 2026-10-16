@@ -48,6 +48,23 @@ def reminder_key(title: str, when: str) -> str:
     return hashlib.sha1(f"{title}|{when}".encode("utf-8")).hexdigest()[:12]
 
 
+def _reminder_stamp(front: dict) -> str | None:
+    field = "remind_at" if front.get("remind_at") else "event_at"
+    raw = parse_datetime(front.get(field))
+    return raw if raw and len(raw) > 10 else None
+
+
+def find_reminder_note(items: list[tuple[str, dict]], key: str) -> tuple[str, dict] | None:
+    """Заметка из среза (ключ строки, свойства), которой принадлежит ключ кнопки напоминания."""
+    for row_key, front in items:
+        if front.get("type") not in ("task", "event"):
+            continue
+        raw = _reminder_stamp(front)
+        if raw and reminder_key(str(front.get("title", "")), raw) == key:
+            return row_key, front
+    return None
+
+
 def due_reminders(items: list[tuple[str, dict]], db: Database, now: datetime) -> list[tuple[str, str, str]]:
     """(ключ, заголовок, подпись) для напоминаний, срок которых наступил и о которых ещё не сообщали."""
     out = []
@@ -101,7 +118,7 @@ async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
     # напоминания в срок (с кнопками отложить)
     if cfg["rem_on"] and notes:
         for key, title, text in due_reminders(items, db, now):
-            buttons = [[("Через час", f"snz1:{key}"), ("Завтра утром", f"snz24:{key}")], [("Ок", f"ok:{key}")]]
+            buttons = [[("Через час", f"snz1:{key}"), ("Завтра утром", f"snz24:{key}")], [("Сделано", f"ok:{key}")]]
             if await broadcast(text, buttons):
                 db.set_setting(f"rem_{key}", "sent")
             sent += len(chats)

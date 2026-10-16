@@ -330,16 +330,17 @@ def create_app(
         return {"status": "success"}
 
     @app.get("/pending")
-    async def pending(request: Request, limit: int = 50):
+    async def pending(request: Request, limit: int = 50, service: int = 0):
         if not authorized(request):
             return _error(401, "Неверный или отсутствующий x-api-key")
-        items = db.pending(max(1, min(limit, 200)))
+        with_service = bool(service)               # служебные записи отдаём только скрипту ноутбука (?service=1)
+        items = db.pending(max(1, min(limit, 200)), service=with_service)
         return {
             "status": "success",
             "count": len(items),
-            "remaining": db.pending_count(),
+            "remaining": db.pending_count(service=with_service),
             "items": [
-                {"id": i["id"], "filename": i["filename"], "folder": i["folder"], "markdown": i["markdown"],
+                {"id": i["id"], "kind": i["kind"], "filename": i["filename"], "folder": i["folder"], "markdown": i["markdown"],
                  "reminders": json.loads(i["reminders"] or "[]")}
                 for i in items
             ],

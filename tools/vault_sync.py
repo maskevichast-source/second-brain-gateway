@@ -9,6 +9,10 @@
 Токен берётся из переменной окружения SECOND_BRAIN_TOKEN (или параметра --token).
 Файл сначала записывается на диск и только потом подтверждается на сервере, поэтому заметка не потеряется.
 Существующие файлы не перезаписываются.
+
+Кроме заметок, очередь содержит служебные записи «закрыть дело» (кнопка «Сделано» в Telegram): скрипт находит
+заметку по названию (и дате создания) и меняет в ней status. Файл не удаляется; если заметка не найдена,
+подходит несколько или статус уже закрыт, запись просто пропускается и подтверждается на сервере.
 """
 from __future__ import annotations
 
@@ -54,15 +58,144 @@ def write_note(vault: Path, folder: str, filename: str, markdown: str) -> Path |
     return path
 
 
+CLOSED_STATUSES = {"сделано", "отменено", "готово", "состоялось", "отказался", "отменена", "завершена",
+                   "достигнута", "отброшена", "расторгнут", "пересмотрено"}
+_HEAD_BYTES = 16384
+
+
+def _unquote(value: str) -> str:
+    value = value.strip()
+    if value.startswith('"'):
+        try:
+            return str(json.loads(value))
+        except ValueError:
+            return value.strip('"')
+    if value.startswith("'") and value.endswith("'") and len(value) >= 2:
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text).split()).casefold()
+
+
+def _read_text(path: Path) -> str:
+    with open(path, encoding="utf-8", newline="") as handle:     # newline="" сохраняет \r\n как есть
+        return handle.read()
+
+
+def _front_lines(text: str):
+    """Индексы строк блока свойств: (список строк с \\n, номер закрывающей ---) или None."""
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return lines, i
+    return None
+
+
+def _front_value(lines, end: int, key: str):
+    prefix = key + ":"
+    for i in range(1, end):
+        if lines[i].startswith(prefix):
+            return i, _unquote(lines[i][len(prefix):])
+    return None, ""
+
+
+def find_notes(vault: Path, title: str, created: str = "") -> list:
+    """Заметки, у которых title совпадает (и created, если он есть у обеих сторон)."""
+    wanted, found = _norm(title), []
+    for path in sorted(vault.rglob("*.md")):
+        if any(part.startswith(".") for part in path.relative_to(vault).parts[:-1]):
+            continue                                              # .obsidian, .trash и т.п.
+        try:
+            with open(path, encoding="utf-8", newline="") as handle:
+                head = handle.read(_HEAD_BYTES)
+            if not head.startswith("---"):
+                continue
+            parsed = _front_lines(head)
+            if not parsed:
+                continue
+            lines, end = parsed
+            if _norm(_front_value(lines, end, "title")[1]) != wanted:
+                continue
+            found.append((path, _front_value(lines, end, "created")[1]))
+        except (OSError, UnicodeDecodeError):
+            continue
+    if created and len(found) > 1:
+        exact = [f for f in found if f[1][:16] == created[:16]]
+        found = exact or found
+    elif created and len(found) == 1 and found[0][1] and found[0][1][:16] != created[:16]:
+        pass                                                        # единственная по названию: доверяем названию
+    return [f[0] for f in found]
+
+
+def close_note(vault: Path, payload: dict) -> str:
+    """Применяет «закрыть дело». Возвращает: closed | already | not_found | ambiguous | invalid."""
+    title = str(payload.get("title") or "").strip()
+    status = str(payload.get("status") or "готово").strip()
+    if not title or not status or "\n" in status:
+        return "invalid"
+    candidates = find_notes(vault, title, str(payload.get("created") or ""))
+    if not candidates:
+        return "not_found"
+    if len(candidates) > 1:
+        return "ambiguous"
+    path = candidates[0]
+    try:
+        text = _read_text(path)
+        parsed = _front_lines(text)
+        if not parsed:
+            return "not_found"
+        lines, end = parsed
+        index, current = _front_value(lines, end, "status")
+        if _norm(current) in CLOSED_STATUSES:
+            return "already"
+        newline = "\r\n" if lines[end].endswith("\r\n") else "\n"
+        row = "status: " + json.dumps(status, ensure_ascii=False) + newline
+        if index is None:
+            lines.insert(end, row)
+        else:
+            lines[index] = row
+        tmp = path.with_name(path.name + ".tmp-sync")
+        with open(tmp, "w", encoding="utf-8", newline="") as handle:
+            handle.write("".join(lines))
+        os.replace(tmp, path)
+    except (OSError, UnicodeDecodeError):
+        return "invalid"
+    return "closed"
+
+
+def apply_service(vault: Path, item: dict) -> str:
+    """Служебная запись из очереди. Неизвестные виды пропускаются (подтверждаются), чтобы очередь не стояла."""
+    try:
+        payload = json.loads(item.get("markdown") or "{}")
+    except ValueError:
+        return "invalid"
+    if not isinstance(payload, dict) or payload.get("action") != "close":
+        return "invalid"
+    return close_note(vault, payload)
+
+
+SERVICE_RU = {"closed": "дело закрыто", "already": "уже закрыто, пропускаю", "not_found": "заметка не найдена, пропускаю",
+              "ambiguous": "подходит несколько заметок, пропускаю", "invalid": "непонятная запись, пропускаю"}
+
+
 def sync_once(url: str, token: str, vault: Path) -> int:
     saved = 0
     while True:
-        batch = api(url, token, "/pending?limit=50")
+        batch = api(url, token, "/pending?limit=50&service=1")
         items = batch.get("items", [])
         if not items:
             return saved
         done = []
         for item in items:
+            if item.get("kind", "note") != "note":
+                result = apply_service(vault, item)
+                print(f"  ~ {(json.loads(item['markdown']).get('title') if result != 'invalid' else '?')}: {SERVICE_RU[result]}")
+                done.append(item["id"])
+                continue
             path = write_note(vault, item.get("folder", ""), item["filename"], item["markdown"])
             if path:
                 saved += 1

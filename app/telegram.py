@@ -502,6 +502,25 @@ def _push_command(text: str, db: Database, settings: Settings) -> str:
             f"• дневник вечером: {yes(d_on)}, {d_at}" + tail)
 
 
+DONE_STATUS = {"task": "сделано", "event": "состоялось"}     # статусы схемы, которые понимают сводки
+
+
+def _close_in_vault(db: Database, key: str) -> bool:
+    """Кнопка «Сделано»: срез помечается закрытым, ноутбуку уходит служебная запись «закрыть дело»."""
+    from . import scheduler
+
+    found = scheduler.find_reminder_note(db.snapshot_items(), key)
+    if not found:
+        return False
+    row_key, front = found
+    status = DONE_STATUS.get(str(front.get("type")), "готово")
+    db.snapshot_put([(row_key, {**front, "status": status})])
+    db.enqueue_service(f"close-{key}", f"close-{key}.json", {
+        "action": "close", "title": str(front.get("title", "")), "created": str(front.get("created", "")),
+        "type": str(front.get("type", "")), "status": status})
+    return True
+
+
 def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict | None:
     from datetime import timedelta
 
@@ -516,6 +535,8 @@ def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict |
     elif action == "ok":
         db.set_setting(f"rem_{key}", "done")
         toast = "Ок, больше не напомню"
+        if _close_in_vault(db, key):
+            toast = "Готово, больше не напомню. Отмечу сделанным в хранилище при выгрузке"
     elif action == "snz1":
         db.set_setting(f"rem_{key}", (now + timedelta(hours=1)).replace(tzinfo=None, microsecond=0).isoformat(timespec="minutes"))
         toast = "Напомню через час"

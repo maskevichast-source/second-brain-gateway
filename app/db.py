@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     markdown    TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     reminders   TEXT NOT NULL DEFAULT '[]',
+    kind        TEXT NOT NULL DEFAULT 'note',
     UNIQUE (capture_id, filename)
 );
 CREATE TABLE IF NOT EXISTS profile (
@@ -89,6 +90,8 @@ class Database:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(outbox)")}
             if "reminders" not in columns:                       # база создана версией до напоминаний
                 conn.execute("ALTER TABLE outbox ADD COLUMN reminders TEXT NOT NULL DEFAULT '[]'")
+            if "kind" not in columns:                            # служебные записи («закрыть дело»)
+                conn.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'note'")
             conn.commit()
         self.purge_expired(vacuum=True)
 
@@ -160,17 +163,35 @@ class Database:
             conn.commit()
         return added
 
-    def pending(self, limit: int = 50) -> list[dict]:
+    def enqueue_service(self, capture_id: str, filename: str, payload: dict) -> int:
+        """Служебная запись для ноутбука (JSON в поле markdown). Телефону и старым клиентам не отдаётся."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            added = conn.execute(
+                "INSERT OR IGNORE INTO outbox (capture_id, filename, folder, markdown, created_at, reminders, kind) "
+                "VALUES (?, ?, '', ?, ?, '[]', 'close')",
+                (capture_id, filename, json.dumps(payload, ensure_ascii=False), now),
+            ).rowcount
+            conn.commit()
+        return added
+
+    def pending(self, limit: int = 50, service: bool = False) -> list[dict]:
+        where = "" if service else "WHERE kind = 'note'"
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                "SELECT id, capture_id, filename, folder, markdown, created_at, reminders FROM outbox ORDER BY id LIMIT ?",
-                (limit,),
+                "SELECT id, capture_id, filename, folder, markdown, created_at, reminders, kind FROM outbox "
+                f"{where} ORDER BY id LIMIT ?", (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def pending_count(self) -> int:
+    def pending_count(self, service: bool = False) -> int:
+        where = "" if service else "WHERE kind = 'note'"
         with closing(self._connect()) as conn:
-            return conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+            return conn.execute(f"SELECT COUNT(*) FROM outbox {where}").fetchone()[0]
+
+    def service_count(self) -> int:
+        with closing(self._connect()) as conn:
+            return conn.execute("SELECT COUNT(*) FROM outbox WHERE kind != 'note'").fetchone()[0]
 
     def ack(self, ids: list[int]) -> int:
         ids = [int(i) for i in ids]
