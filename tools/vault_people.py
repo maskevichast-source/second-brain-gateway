@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 PEOPLE_DIR = "1-Люди"
-SKIP_DIRS = {"Шаблоны", "Дашборды", "3-Архив", ".obsidian", ".trash"}
+SKIP_DIRS = {"7-Исходники", "Шаблоны", "Дашборды", "3-Архив", ".obsidian", ".trash"}
 
 SCALARS = (
     "first_name", "last_name", "patronymic", "relation", "relation_group", "how_met", "met_date",

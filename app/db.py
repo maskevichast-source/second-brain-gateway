@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS tg_pending (
     chat_id    INTEGER PRIMARY KEY,
     capture_id TEXT NOT NULL,
     content    TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    sources    TEXT NOT NULL DEFAULT '[]'
 );
 """
 
@@ -92,6 +93,9 @@ class Database:
                 conn.execute("ALTER TABLE outbox ADD COLUMN reminders TEXT NOT NULL DEFAULT '[]'")
             if "kind" not in columns:                            # служебные записи («закрыть дело»)
                 conn.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'note'")
+            waiting = {row["name"] for row in conn.execute("PRAGMA table_info(tg_pending)")}
+            if "sources" not in waiting:                         # исходники, ожидающие уточнения
+                conn.execute("ALTER TABLE tg_pending ADD COLUMN sources TEXT NOT NULL DEFAULT '[]'")
             conn.commit()
         self.purge_expired(vacuum=True)
 
@@ -163,6 +167,27 @@ class Database:
             conn.commit()
         return added
 
+    def enqueue_files(self, capture_id: str, planned: list[dict]) -> int:
+        """Исходники: в очереди только квитанция (id файла в Telegram), сами байты сервер не хранит."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        added = 0
+        with closing(self._connect()) as conn:
+            for p in planned:
+                meta = {k: p[k] for k in ("file_id", "mime", "size", "kind", "name") if k in p}
+                added += conn.execute(
+                    "INSERT OR IGNORE INTO outbox (capture_id, filename, folder, markdown, created_at, reminders, kind) "
+                    "VALUES (?, ?, ?, ?, ?, '[]', 'file')",
+                    (capture_id, p["filename"], p["folder"], json.dumps(meta, ensure_ascii=False), now),
+                ).rowcount
+            conn.commit()
+        return added
+
+    def get_item(self, item_id: int) -> dict | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT id, kind, filename, folder, markdown FROM outbox WHERE id = ?",
+                               (int(item_id),)).fetchone()
+        return dict(row) if row else None
+
     def enqueue_service(self, capture_id: str, filename: str, payload: dict) -> int:
         """Служебная запись для ноутбука (JSON в поле markdown). Телефону и старым клиентам не отдаётся."""
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -209,11 +234,12 @@ class Database:
 
     # ---------- ожидание уточнения в Telegram ----------
 
-    def set_waiting(self, chat_id: int, capture_id: str, content: str) -> None:
+    def set_waiting(self, chat_id: int, capture_id: str, content: str, sources: list | None = None) -> None:
         with closing(self._connect()) as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO tg_pending (chat_id, capture_id, content, created_at) VALUES (?, ?, ?, ?)",
-                (chat_id, capture_id, content, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+                "INSERT OR REPLACE INTO tg_pending (chat_id, capture_id, content, created_at, sources) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, capture_id, content, datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                 json.dumps(sources or [], ensure_ascii=False)),
             )
             conn.commit()
 
@@ -221,10 +247,14 @@ class Database:
         cutoff = (datetime.now(timezone.utc) - self.ttl).isoformat(timespec="seconds")
         with closing(self._connect()) as conn:
             row = conn.execute(
-                "SELECT capture_id, content FROM tg_pending WHERE chat_id = ? AND created_at >= ?",
+                "SELECT capture_id, content, sources FROM tg_pending WHERE chat_id = ? AND created_at >= ?",
                 (chat_id, cutoff),
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        data = dict(row)
+        data["sources"] = json.loads(data.get("sources") or "[]")
+        return data
 
     def clear_waiting(self, chat_id: int) -> None:
         with closing(self._connect()) as conn:

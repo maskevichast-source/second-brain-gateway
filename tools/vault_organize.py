@@ -35,7 +35,7 @@ from pathlib import Path
 INBOX = "0-Inbox"
 PEOPLE_DIR = "1-Люди"
 ARCHIVE_DIR = "3-Архив"
-SKIP_DIRS = {"Шаблоны", "Дашборды", ".obsidian", ".trash", ARCHIVE_DIR}
+SKIP_DIRS = {"7-Исходники", "Шаблоны", "Дашборды", ".obsidian", ".trash", ARCHIVE_DIR}
 NEVER_MOVE_TYPES = {"person", "note", "bookmark"}
 CLOSED = {"сделано", "отменено", "готово", "состоялось", "отказался", "отменена", "завершена",
           "достигнута", "отброшена", "расторгнут", "пересмотрено", "отвечен", "реализована", "отброшена"}

@@ -16,7 +16,7 @@ from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import ada as ada_module
@@ -374,6 +374,26 @@ def create_app(
                 for i in items
             ],
         }
+
+    @app.get("/file/{item_id}")
+    async def pending_file(request: Request, item_id: int):
+        """Байты исходника из очереди: сервер скачивает файл из Telegram и сразу отдаёт ноутбуку, нигде не сохраняя."""
+        if not authorized(request):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        item = db.get_item(item_id)
+        if not item or item["kind"] != "file":
+            return _error(404, "Такого файла в очереди нет")
+        try:
+            meta = json.loads(item["markdown"])
+        except ValueError:
+            return _error(404, "Такого файла в очереди нет")
+        if file_fetcher is None:
+            return _error(503, "На сервере нет токена бота: файл скачать нельзя")
+        data = await file_fetcher(str(meta.get("file_id") or ""))
+        if data is None:
+            return _error(502, "Telegram не отдал файл (слишком большой или недоступен)")
+        return Response(content=data, media_type=str(meta.get("mime") or "application/octet-stream"),
+                        headers={"Cache-Control": "no-store"})
 
     @app.post("/ack")
     async def ack(request: Request):

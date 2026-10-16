@@ -16,6 +16,7 @@ import re
 from typing import Awaitable, Callable
 
 from . import diary, interview
+from . import sources as sources_module
 from .config import Settings
 from .db import Database
 from .textutil import one_line, split_private
@@ -129,7 +130,14 @@ async def _save(db: Database, process: Processor, *, capture_id: str, content: s
     response = await process(capture_id=capture_id, client="telegram", content=content,
                              revision=revision, clarifications=clarifications)
     if not response.get("needs_review") or revision != 1:
-        db.enqueue(capture_id, response["files"])
+        sources = sources_module.CURRENT.get()
+        files = response["files"]
+        if sources and files:
+            planned = sources_module.plan(sources, capture_id, files[0]["filename"][:10])
+            for f in files:
+                f["markdown"] = sources_module.attach(f["markdown"], planned)
+            db.enqueue_files(capture_id, planned)
+        db.enqueue(capture_id, files)
         _learn_people(db, response)
     return response
 
@@ -223,10 +231,14 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         if not waiting:
             return _reply(chat_id, "Сейчас нечего пропускать.")
         capture_id, content, clarifications, revision = waiting["capture_id"], waiting["content"], "", 2
+        if waiting.get("sources"):
+            sources_module.CURRENT.set(waiting["sources"])
     elif command:
         return _reply(chat_id, "Не знаю такой команды. " + HELP.split("\n\n")[0])
     elif waiting:
         capture_id, content, clarifications, revision = waiting["capture_id"], waiting["content"], text, 2
+        if waiting.get("sources"):
+            sources_module.CURRENT.set(waiting["sources"])
     else:
         capture_id, content, clarifications, revision = f"tg-{update_id}", text, "", 1
 
@@ -238,7 +250,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     if revision == 2:
         db.clear_waiting(chat_id)
     if response.get("needs_review") and revision == 1:
-        db.set_waiting(chat_id, capture_id, content)
+        db.set_waiting(chat_id, capture_id, content, sources_module.CURRENT.get())
         questions = "\n".join(f"• {q}" for q in response.get("review_questions", []))
         return _reply(chat_id, f"Нужно уточнение:\n{questions}\n\nОтветь одним сообщением или /skip.")
     summary = _summary(response)
@@ -365,7 +377,15 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
                   secretary=None, clock=None, transcriber=None, backup_sender=None, file_fetcher=None,
                   vision=None) -> dict:
     """Вложения читаются (PDF, картинки), затем обычная обработка; к ответу добавляется честная пометка."""
+    sources, too_big = sources_module.collect(message)
+    sources_module.CURRENT.set(sources if not (message.get("text") or message.get("caption") or "").strip().startswith("/") else [])
     message, notice = await _attachment(message, settings, file_fetcher, vision)
+    if sources_module.CURRENT.get():
+        notice = (notice + "\n" if notice else "") + "📎 Оригинал сохраню в 7-Исходники, когда ноутбук заберёт очередь."
+    if too_big:
+        notice = (notice + "\n" if notice else "") + (
+            f"⚠️ Файл «{too_big[0]}» больше 20 МБ: Telegram не отдаёт такие файлы боту, оригинал не сохранён. "
+            "Закинь его в хранилище вручную.")
     reply = await _answer_core(message, chat_id, update_id, settings=settings, db=db, process=process,
                                secretary=secretary, clock=clock, transcriber=transcriber, backup_sender=backup_sender)
     if notice and reply.get("method") == "sendMessage":

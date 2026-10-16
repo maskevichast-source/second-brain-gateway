@@ -13,6 +13,9 @@
 После каждой выгрузки запускаются vault_organize.py (раскладка по папкам и связи между заметками) и vault_people.py
 (карточки людей), если лежат рядом. Отключить: --no-organize.
 
+Исходники (голос, PDF, фото, скриншоты) приходят записями kind=file: скрипт скачивает файл с сервера и кладёт в
+7-Исходники/ГОД-МЕСЯЦ; пока файл не скачан, запись остаётся в очереди.
+
 Кроме заметок, очередь содержит служебные записи «закрыть дело» (кнопка «Сделано» в Telegram): скрипт находит
 заметку по названию (и дате создания) и меняет в ней status. Файл не удаляется; если заметка не найдена,
 подходит несколько или статус уже закрыт, запись просто пропускается и подтверждается на сервере.
@@ -37,6 +40,31 @@ def api(url: str, token: str, path: str, body: dict | None = None):
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def download(url: str, token: str, path: str) -> bytes:
+    request = urllib.request.Request(url.rstrip("/") + path, headers={"x-api-key": token})
+    with urllib.request.urlopen(request, timeout=180) as response:
+        return response.read()
+
+
+def safe_rel(folder: str, default: str = "7-Исходники") -> Path:
+    """Папка внутри хранилища из двух частей максимум (7-Исходники/2026-10), без выхода за пределы."""
+    parts = [safe_part(p) for p in folder.replace("\\", "/").split("/") if p.strip().strip(".")]
+    return Path(*parts[:2]) if parts else Path(default)
+
+
+def save_source(vault: Path, item: dict, data: bytes) -> Path | None:
+    """Кладёт исходник в папку и не затирает существующий. None, если такой файл уже лежит."""
+    target_dir = vault / safe_rel(item.get("folder") or "")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / safe_part(item["filename"])
+    if path.exists():
+        return None
+    tmp = path.with_name(path.name + ".tmp-sync")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+    return path
 
 
 def safe_part(name: str) -> str:
@@ -217,6 +245,24 @@ def sync_once(url: str, token: str, vault: Path) -> int:
             return saved
         done = []
         for item in items:
+            if item.get("kind") == "file":
+                try:
+                    data = download(url, token, f"/file/{item['id']}")
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 404:
+                        print(f"  ! исходник {item['filename']}: на сервере его уже нет, пропускаю")
+                        done.append(item["id"])
+                    else:
+                        print(f"  ! исходник {item['filename']}: не получилось скачать ({exc.code}), попробую позже")
+                    continue
+                except (urllib.error.URLError, OSError) as exc:
+                    print(f"  ! исходник {item['filename']}: {type(exc).__name__}, попробую позже")
+                    continue
+                path = save_source(vault, item, data)
+                if path:
+                    print(f"  + {path.relative_to(vault)}")
+                done.append(item["id"])
+                continue
             if item.get("kind", "note") != "note":
                 result = apply_service(vault, item)
                 print(f"  ~ {(json.loads(item['markdown']).get('title') if result != 'invalid' else '?')}: {SERVICE_RU[result]}")
@@ -227,9 +273,10 @@ def sync_once(url: str, token: str, vault: Path) -> int:
                 saved += 1
                 print(f"  + {path.relative_to(vault)}")
             done.append(item["id"])           # дошли сюда — файл на диске (или уже был)
-        api(url, token, "/ack", {"ids": done})
-        if batch.get("remaining", 0) <= len(items):
-            return saved
+        if done:
+            api(url, token, "/ack", {"ids": done})
+        if len(done) < len(items) or batch.get("remaining", 0) <= len(items):
+            return saved            # что-то не скачалось: повторим на следующем проходе, а не крутимся по кругу
 
 
 def main(argv=None) -> int:
