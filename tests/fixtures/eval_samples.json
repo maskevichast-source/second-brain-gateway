@@ -1,0 +1,814 @@
+{
+ "now": "2026-10-12T09:30",
+ "timezone": "Asia/Almaty",
+ "samples": [
+  {
+   "id": "task-friday",
+   "text": "Надо отправить смету Серику до пятницы",
+   "note": "«до пятницы» от понедельника 12.10 = 16.10",
+   "ai": {
+    "notes": [
+     {
+      "type": "task",
+      "area": "работа",
+      "title": "Отправить смету Серику",
+      "summary": "Отправить смету Серику",
+      "confidence": 0.9,
+      "status": "открыто",
+      "people": [
+       "Серик"
+      ],
+      "fields": {
+       "due": "2026-10-16"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "task",
+      "area": "работа",
+      "status": "открыто",
+      "fields": {
+       "due": "2026-10-16"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "call",
+   "text": "Позвонил Ерлану, договорились встретиться в среду",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "interaction",
+      "area": "окружение",
+      "title": "Звонок Ерлану",
+      "summary": "Звонок Ерлану",
+      "confidence": 0.9,
+      "kind": "звонок",
+      "people": [
+       "Ерлан"
+      ],
+      "fields": {
+       "topic": "встреча в среду",
+       "agreements": "встретиться в среду"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "interaction",
+      "area": "окружение",
+      "kind": "звонок"
+     }
+    ]
+   }
+  },
+  {
+   "id": "idea",
+   "text": "Идея: сделать в приложении семейный календарь с общими покупками",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "idea",
+      "area": "хобби",
+      "title": "Семейный календарь с общими покупками",
+      "summary": "Семейный календарь с общими покупками",
+      "confidence": 0.9,
+      "status": "сырая"
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "idea",
+      "area": "хобби",
+      "status": "сырая"
+     }
+    ]
+   }
+  },
+  {
+   "id": "movie",
+   "text": "Серик посоветовал фильм Дюна",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "media",
+      "area": "отдых",
+      "title": "Дюна",
+      "summary": "Дюна",
+      "confidence": 0.9,
+      "kind": "фильм",
+      "status": "хочу",
+      "people": [
+       "Серик"
+      ],
+      "fields": {
+       "recommended_by": "Серик"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "media",
+      "area": "отдых",
+      "kind": "фильм",
+      "status": "хочу",
+      "fields": {
+       "recommended_by": "[[Серик]]"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "purchase",
+   "text": "Купить робот-пылесос до конца месяца",
+   "note": "ИИ вернул не дату: поле должно отбрасываться",
+   "ai": {
+    "notes": [
+     {
+      "type": "product",
+      "area": "дом",
+      "title": "Робот-пылесос",
+      "summary": "Робот-пылесос",
+      "confidence": 0.9,
+      "kind": "техника",
+      "status": "хочу",
+      "fields": {
+       "deadline": "конец месяца"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "product",
+      "area": "дом",
+      "kind": "техника",
+      "status": "хочу",
+      "absent": [
+       "deadline"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "home-interval",
+   "text": "Менять фильтр в кухонном кране каждые 3 месяца, в прошлый раз 1 сентября",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "home",
+      "area": "дом",
+      "title": "Замена фильтра в кухонном кране",
+      "summary": "Замена фильтра в кухонном кране",
+      "confidence": 0.9,
+      "kind": "уход",
+      "status": "открыто",
+      "fields": {
+       "item": "фильтр кухонного крана",
+       "schedule": "раз в 3 месяца",
+       "next_due": "2026-12-01"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "home",
+      "area": "дом",
+      "kind": "уход",
+      "fields": {
+       "next_due": "2026-12-01",
+       "schedule": "раз в 3 месяца"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "document",
+   "text": "Договор аренды парковки действует до 20 ноября",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "document",
+      "area": "финансы",
+      "title": "Договор аренды парковки",
+      "summary": "Договор аренды парковки",
+      "confidence": 0.9,
+      "kind": "договор",
+      "status": "действует",
+      "fields": {
+       "valid_until": "2026-11-20"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "document",
+      "area": "финансы",
+      "kind": "договор",
+      "status": "действует",
+      "fields": {
+       "valid_until": "2026-11-20"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "health",
+   "text": "Болит голова второй день, записался к терапевту на четверг в 10",
+   "note": "без диагнозов: в ответе ИИ их нет, и код ничего не добавляет",
+   "ai": {
+    "notes": [
+     {
+      "type": "health",
+      "area": "здоровье",
+      "title": "Головная боль второй день",
+      "summary": "Головная боль второй день",
+      "confidence": 0.9,
+      "kind": "симптом",
+      "body": "Болит голова второй день."
+     },
+     {
+      "type": "event",
+      "area": "здоровье",
+      "title": "Приём у терапевта",
+      "summary": "Приём у терапевта",
+      "confidence": 0.9,
+      "status": "запланировано",
+      "fields": {
+       "event_at": "2026-10-15T10:00"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "health",
+      "area": "здоровье",
+      "kind": "симптом"
+     },
+     {
+      "type": "event",
+      "area": "здоровье",
+      "fields": {
+       "event_at": "2026-10-15T10:00"
+      }
+     }
+    ],
+    "forbid_text": [
+     "диагноз"
+    ]
+   }
+  },
+  {
+   "id": "person-birthday",
+   "text": "Новый знакомый Данияр, коллега из отдела продаж, ДР 14 марта",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "person",
+      "area": "окружение",
+      "title": "Данияр",
+      "summary": "Данияр",
+      "confidence": 0.9,
+      "fields": {
+       "name": "Данияр",
+       "relation": "коллега",
+       "company": "отдел продаж",
+       "birthday": "03-14"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "person",
+      "area": "окружение",
+      "fields": {
+       "birthday": "03-14",
+       "relation": "коллега"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "link",
+   "text": "https://example.com/nalogovye-vychety-2026 про налоговые вычеты, прочитать потом",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "bookmark",
+      "area": "финансы",
+      "title": "Налоговые вычеты 2026",
+      "summary": "Налоговые вычеты 2026",
+      "confidence": 0.9,
+      "status": "не-разобрано",
+      "source_url": "https://example.com/nalogovye-vychety-2026",
+      "fields": {
+       "why_saved": "прочитать потом"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "bookmark",
+      "area": "финансы",
+      "status": "не-разобрано",
+      "fields": {
+       "source_url": "https://example.com/nalogovye-vychety-2026"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "multi",
+   "text": "Серик посоветовал Дюну, а ещё надо позвонить маме",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "media",
+      "area": "отдых",
+      "title": "Дюна",
+      "summary": "Дюна",
+      "confidence": 0.9,
+      "kind": "фильм",
+      "status": "хочу",
+      "people": [
+       "Серик"
+      ]
+     },
+     {
+      "type": "task",
+      "area": "семья",
+      "title": "Позвонить маме",
+      "summary": "Позвонить маме",
+      "confidence": 0.9,
+      "status": "открыто"
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "media",
+      "area": "отдых"
+     },
+     {
+      "type": "task",
+      "area": "семья"
+     }
+    ]
+   }
+  },
+  {
+   "id": "private-bang",
+   "text": "! пароль от роутера 1234",
+   "note": "режим «без ИИ»: ИИ не вызывается",
+   "ai": null,
+   "expect": {
+    "private": true,
+    "notes": [
+     {
+      "type": "note",
+      "area": "разное"
+     }
+    ]
+   }
+  },
+  {
+   "id": "private-secret",
+   "text": "секрет: код от сейфа 5678",
+   "note": "",
+   "ai": null,
+   "expect": {
+    "private": true,
+    "notes": [
+     {
+      "type": "note",
+      "area": "разное"
+     }
+    ]
+   }
+  },
+  {
+   "id": "trip",
+   "text": "Хочу в декабре поехать в Стамбул с 10 по 17 декабря",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "trip",
+      "area": "поездки",
+      "title": "Стамбул, декабрь",
+      "summary": "Стамбул, декабрь",
+      "confidence": 0.9,
+      "status": "планирую",
+      "fields": {
+       "destination": "Стамбул",
+       "date_from": "2026-12-10",
+       "date_to": "2026-12-17"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "trip",
+      "area": "поездки",
+      "status": "планирую",
+      "fields": {
+       "date_from": "2026-12-10"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "event",
+   "text": "Родительское собрание в школе 20 октября в 18:30",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "event",
+      "area": "семья",
+      "title": "Родительское собрание",
+      "summary": "Родительское собрание",
+      "confidence": 0.9,
+      "status": "запланировано",
+      "fields": {
+       "event_at": "2026-10-20T18:30",
+       "location": "школа"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "event",
+      "area": "семья",
+      "fields": {
+       "event_at": "2026-10-20T18:30"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "case",
+   "text": "Мебельщики сорвали срок, написал претензию, жду ответа до 25 октября",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "case",
+      "area": "дом",
+      "title": "Спор с мебельщиками о сроках",
+      "summary": "Спор с мебельщиками о сроках",
+      "confidence": 0.9,
+      "kind": "спор",
+      "status": "ждёт",
+      "fields": {
+       "counterparty": "мебельщики",
+       "deadline": "2026-10-25",
+       "next_step": "ждать ответа на претензию"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "case",
+      "area": "дом",
+      "kind": "спор",
+      "status": "ждёт",
+      "fields": {
+       "deadline": "2026-10-25"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "decision",
+   "text": "Решил взять тариф подешевле, пересмотрю через полгода",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "decision",
+      "area": "финансы",
+      "title": "Взять тариф подешевле",
+      "summary": "Взять тариф подешевле",
+      "confidence": 0.9,
+      "status": "принято",
+      "fields": {
+       "review_at": "2027-04-12"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "decision",
+      "area": "финансы",
+      "status": "принято",
+      "fields": {
+       "review_at": "2027-04-12"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "quote",
+   "text": "«Делай что должно, и будь что будет» — Марк Аврелий",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "quote",
+      "area": "развитие",
+      "title": "Делай что должно",
+      "summary": "Делай что должно",
+      "confidence": 0.9,
+      "fields": {
+       "author": "Марк Аврелий"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "quote",
+      "area": "развитие",
+      "fields": {
+       "author": "Марк Аврелий"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "place",
+   "text": "Кафе «Урюк» на Достык, хвалили за плов",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "place",
+      "area": "отдых",
+      "title": "Кафе «Урюк»",
+      "summary": "Кафе «Урюк»",
+      "confidence": 0.9,
+      "kind": "кафе",
+      "status": "хочу",
+      "fields": {
+       "address": "Достык",
+       "why": "хвалили за плов"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "place",
+      "area": "отдых",
+      "kind": "кафе",
+      "status": "хочу"
+     }
+    ]
+   }
+  },
+  {
+   "id": "journal",
+   "text": "Дневник: тяжёлый день, но вечером погулял с женой, настроение 7",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "journal",
+      "area": "разное",
+      "title": "Дневник 12 октября",
+      "summary": "Дневник 12 октября",
+      "confidence": 0.9,
+      "fields": {
+       "mood": "7 из 10"
+      },
+      "body": "Тяжёлый день, вечером прогулка с женой."
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "journal",
+      "area": "разное"
+     }
+    ]
+   }
+  },
+  {
+   "id": "goal",
+   "text": "Цель на год: накопить 2 млн на отпуск",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "goal",
+      "area": "финансы",
+      "title": "Накопить 2 млн на отпуск",
+      "summary": "Накопить 2 млн на отпуск",
+      "confidence": 0.9,
+      "status": "активна",
+      "fields": {
+       "horizon": "год",
+       "metric": "2 000 000 ₸"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "goal",
+      "area": "финансы",
+      "status": "активна",
+      "fields": {
+       "horizon": "год"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "question",
+   "text": "Вопрос: можно ли оформить налоговый вычет за обучение через год после оплаты?",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "question",
+      "area": "финансы",
+      "title": "Налоговый вычет за обучение через год",
+      "summary": "Налоговый вычет за обучение через год",
+      "confidence": 0.9,
+      "status": "открыт"
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "question",
+      "area": "финансы",
+      "status": "открыт"
+     }
+    ]
+   }
+  },
+  {
+   "id": "project",
+   "text": "Проект ремонт балкона: нужно выбрать подрядчика, срок до конца ноября",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "project",
+      "area": "дом",
+      "title": "Ремонт балкона",
+      "summary": "Ремонт балкона",
+      "confidence": 0.9,
+      "status": "открыто",
+      "fields": {
+       "outcome": "отремонтированный балкон",
+       "deadline": "2026-11-30",
+       "next_action": "выбрать подрядчика"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "project",
+      "area": "дом",
+      "fields": {
+       "deadline": "2026-11-30"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "reminder-time",
+   "text": "Напомни завтра в 9 позвонить в УК",
+   "note": "",
+   "ai": {
+    "notes": [
+     {
+      "type": "task",
+      "area": "дом",
+      "title": "Позвонить в УК",
+      "summary": "Позвонить в УК",
+      "confidence": 0.9,
+      "status": "открыто",
+      "fields": {
+       "remind_at": "2026-10-13T09:00"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "task",
+      "area": "дом",
+      "fields": {
+       "remind_at": "2026-10-13T09:00"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "messy-ai",
+   "text": "Встреча с Айгерим по поводу школы",
+   "note": "ИИ выдумал тип, сферу и статус: код приводит к note / разное",
+   "ai": {
+    "notes": [
+     {
+      "type": "meeting",
+      "area": "family",
+      "title": "Встреча с Айгерим",
+      "summary": "Встреча с Айгерим",
+      "confidence": 0.9,
+      "status": "done",
+      "tags": [
+       "#школа",
+       "Школа",
+       "школа"
+      ],
+      "fields": {
+       "when": "завтра"
+      }
+     }
+    ]
+   },
+   "expect": {
+    "notes": [
+     {
+      "type": "note",
+      "area": "разное",
+      "absent": [
+       "status",
+       "when"
+      ],
+      "fields": {
+       "tags": "школа"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}
