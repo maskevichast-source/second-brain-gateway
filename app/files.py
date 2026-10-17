@@ -105,7 +105,11 @@ async def describe_image(settings: Settings, data: bytes, mime: str = "image/jpe
                 "messages": [{"role": "user", "content": [
                     {"type": "text", "text": VISION_PROMPT},
                     {"type": "image_url", "image_url": {"url": url}}]}]}
-        if "generativelanguage.googleapis.com" in base:
+        if "api.openai.com" in base:
+            # новые модели OpenAI не принимают max_tokens и temperature; max_completion_tokens понимают и старые
+            body.pop("max_tokens"), body.pop("temperature")
+            body["max_completion_tokens"] = 4000
+        elif "generativelanguage.googleapis.com" in base:
             # Gemini «думает» перед ответом и тратит на это лимит токенов: думаем минимально, лимит побольше
             body["reasoning_effort"] = "low"
             body["max_tokens"] = 4000

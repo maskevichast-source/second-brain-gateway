@@ -172,6 +172,10 @@ def test_describe_image_uses_openai_compatible_call_and_falls_back(tmp_path):
     assert seen2["url"] == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     assert seen2["auth"] == "Bearer gkey" and seen2["body"]["reasoning_effort"] == "low" and seen2["body"]["max_tokens"] == 4000
     assert "reasoning_effort" not in seen["body"]                          # Groq этот параметр не получает
+    oa = make_settings(tmp_path, vision_model="gpt-4o-mini", vision_api_key="sk-x", vision_base_url="https://api.openai.com/v1")
+    assert asyncio.run(files.describe_image(oa, b"x", "image/png", httpx.AsyncClient(transport=httpx.MockTransport(gem)))) == "Чек: 1200"
+    assert seen2["url"] == "https://api.openai.com/v1/chat/completions" and seen2["auth"] == "Bearer sk-x"
+    assert seen2["body"]["max_completion_tokens"] == 4000 and "max_tokens" not in seen2["body"] and "temperature" not in seen2["body"]
     only_vision_key = make_settings(tmp_path, vision_model="m", vision_api_key="k")      # STT_API_KEY не нужен
     assert files.vision_enabled(only_vision_key)
     off = make_settings(tmp_path, stt_api_key="k")                            # VISION_MODEL не задан: выключено
