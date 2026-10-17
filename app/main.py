@@ -413,7 +413,10 @@ def create_app(
         if not authorized(request):
             return _error(401, "Неверный или отсутствующий x-api-key")
         try:
-            ids = json.loads(await request.body()).get("ids", [])
+            body = json.loads(await request.body())
+            ids = body.get("ids", body.get("id", []))
+            if isinstance(ids, (int, str)) and not isinstance(ids, bool):
+                ids = [ids]            # шорткату проще прислать одно значение, чем список
             if not isinstance(ids, list):
                 raise ValueError
             ids = [int(i) for i in ids]

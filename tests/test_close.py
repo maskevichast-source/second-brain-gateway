@@ -110,3 +110,11 @@ def test_vault_sync_is_stdlib_only():
     mods = {n.module.split(".")[0] if isinstance(n, ast.ImportFrom) else a.name.split(".")[0]
             for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in (getattr(n, "names", None) or [n])}
     assert mods <= {"__future__", "argparse", "json", "os", "sys", "time", "urllib", "pathlib", "hashlib", "vault_organize", "vault_people"}   # два последних лежат рядом, тоже stdlib
+
+
+def test_ack_accepts_single_id_number_or_text(tg):
+    client = tg(StubLLM(None))
+    for value in (5, "5", [5], ["5"]):
+        assert client.post("/ack", json={"ids": value}, headers=auth()).status_code == 200
+    assert client.post("/ack", json={"id": 5}, headers=auth()).status_code == 200
+    assert client.post("/ack", json={"ids": "abc"}, headers=auth()).status_code == 422
