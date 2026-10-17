@@ -370,9 +370,31 @@ class Database:
             conn.commit()
 
     def get_context(self) -> str:
+        """Профиль с ноутбука плюс короткие факты, которые владелец сказал боту командой /fact."""
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT value FROM profile WHERE key = 'context'").fetchone()
-        return row["value"] if row else ""
+        base = row["value"] if row else ""
+        facts = self.get_facts()
+        return (base + "\n" + "\n".join(f"- {f}" for f in facts)).strip() if facts else base
+
+    def get_facts(self) -> list[str]:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT value FROM profile WHERE key = 'facts'").fetchone()
+        try:
+            return [str(f) for f in json.loads(row["value"])] if row else []
+        except ValueError:
+            return []
+
+    def add_fact(self, text: str, limit: int = 40) -> int:
+        """Короткий факт о жизни владельца («Собаку зовут Янка»). Старые вытесняются, повторы не плодятся."""
+        text = " ".join(text.split())[:200]
+        facts = [f for f in self.get_facts() if f.lower() != text.lower()] + [text]
+        facts = facts[-limit:]
+        with closing(self._connect()) as conn:
+            conn.execute("INSERT OR REPLACE INTO profile (key, value, updated_at) VALUES ('facts', ?, ?)",
+                         (json.dumps(facts, ensure_ascii=False), datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            conn.commit()
+        return len(facts)
 
     def known_people(self) -> list[dict]:
         with closing(self._connect()) as conn:
@@ -404,7 +426,7 @@ class Database:
 
     def clear_profile(self) -> None:
         with closing(self._connect()) as conn:
-            conn.execute("DELETE FROM profile WHERE key = 'context'")
+            conn.execute("DELETE FROM profile WHERE key IN ('context', 'facts')")
             conn.execute("DELETE FROM known_people")
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

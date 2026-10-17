@@ -143,7 +143,8 @@ def create_app(
     link_fetcher = link_fetcher or links_module.fetch_link_info
     ask_llm = ask_llm or ask_module.ask_llm
     expand_llm = expand_llm or ask_module.expand_query
-    transcriber = transcriber or (lambda file_id: stt_module.transcribe(settings, file_id))
+    transcriber = transcriber or (lambda file_id: stt_module.transcribe(
+        settings, file_id, hint=stt_module.build_hint([p["name"] for p in db.known_people()], db.get_facts())))
     clock = clock or (lambda: datetime.now(ZoneInfo(settings.timezone)))
 
     db = Database(settings.data_dir / "brain.db", ttl_hours=settings.response_ttl_hours,

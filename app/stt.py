@@ -18,11 +18,22 @@ MAX_SECONDS = 300
 MAX_BYTES = 20 * 1024 * 1024          # лимит скачивания файлов у Telegram Bot API
 
 
+def build_hint(names: list[str], facts: list[str]) -> str:
+    """Подсказка распознавателю: имена людей и клички из фактов, чтобы «Янка» не превращалась в «янки»."""
+    words: list[str] = []
+    for item in [*names, *facts]:
+        for word in item.replace(",", " ").replace(".", " ").split():
+            if word[:1].isupper() and len(word) > 2 and word not in words:
+                words.append(word)
+    return ("Имена: " + ", ".join(words[:40])) if words else ""
+
+
 def configured(settings: Settings) -> bool:
     return bool(settings.stt_api_key and settings.telegram_bot_token)
 
 
-async def transcribe(settings: Settings, file_id: str, http_client: httpx.AsyncClient | None = None) -> str | None:
+async def transcribe(settings: Settings, file_id: str, http_client: httpx.AsyncClient | None = None,
+                     hint: str = "") -> str | None:
     """Текст голосового сообщения или None, если не получилось."""
     if not configured(settings):
         return None
@@ -47,7 +58,8 @@ async def transcribe(settings: Settings, file_id: str, http_client: httpx.AsyncC
             f"{settings.stt_base_url}/audio/transcriptions",
             headers={"Authorization": f"Bearer {settings.stt_api_key}"},
             files={"file": (filename, audio.content, "audio/ogg")},
-            data={"model": settings.stt_model, "language": "ru", "response_format": "json"},
+            data={"model": settings.stt_model, "language": "ru", "response_format": "json",
+                  **({"prompt": hint[:400]} if hint else {})},
         )
         response.raise_for_status()
         text = str(response.json().get("text", "")).strip()

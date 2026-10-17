@@ -133,3 +133,19 @@ def test_requeue_returns_acked_notes_but_does_not_duplicate_queued_ones(tmp_path
     assert [i["filename"] for i in items] == ["2026-10-17-test.md"]
     db.ack([items[0]["id"]])
     assert db.requeue_recent(6) == 1
+
+
+def test_facts_join_context_and_feed_voice_hint(tmp_path):
+    from app import stt
+    from app.db import Database
+    db = Database(tmp_path / "f.db")
+    db.init()
+    db.set_context("Живу в Астане")
+    db.add_fact("Собаку зовут Янка")
+    db.add_fact("собаку зовут янка")                      # повтор не плодится
+    assert db.get_facts() == ["собаку зовут янка"]
+    assert "Живу в Астане" in db.get_context() and "янка" in db.get_context()
+    hint = stt.build_hint(["Диана Шангараева"], ["Собаку зовут Янка"])
+    assert "Янка" in hint and "Диана" in hint
+    db.clear_profile()
+    assert db.get_facts() == [] and db.get_context() == ""
