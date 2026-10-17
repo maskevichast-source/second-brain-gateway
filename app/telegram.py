@@ -33,7 +33,7 @@ HELP = (
     "• /diary — вечерний дневник: расспрошу про день. Или сразу «дневник: текст». Время напоминания: /diary время 22:00.\n"
     "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки.\n"
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
-    "/brief Имя — что знать перед встречей, /budget — бюджет из «Ады».\n"
+    "/who Имя (или /brief) — что знать перед встречей, /promises — кто что кому обещал, /radar — с кем давно не общались, /budget — бюджет из «Ады».\n"
     "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
     "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
     "• /people — кого я знаю. /status — очередь, срез, сбои. /sync — состояние среза, /forget — стереть срез, /backup — файл с копией профиля и среза.\n\n"
@@ -167,18 +167,19 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return _reply(chat_id, HELP)
     if command == "/push":
         return _reply(chat_id, _push_command(text, db, settings))
-    if command in ("/ask", "/day", "/week", "/brief", "/budget", "/health", "/remember", "/merge"):
+    command = {"/кто": "/who", "/радар": "/radar", "/обещания": "/promises", "/долги": "/promises"}.get(command, command)
+    if command in ("/ask", "/day", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
             return _reply(chat_id, "Эта команда пока недоступна.")
-        if command in ("/health", "/remember"):
+        if command in ("/health", "/remember", "/radar", "/promises"):
             arg = ""
         if command == "/merge":
             arg = arg.split()[0] if arg.split() and arg.split()[0].isdigit() else ""
         if command == "/ask" and not arg:
             return _reply(chat_id, "Напиши вопрос после команды, например: /ask что я обещал Серику?")
-        if command == "/brief" and not arg:
-            return _reply(chat_id, "С кем встреча? Например: /brief Серик")
+        if command in ("/brief", "/who") and not arg:
+            return _reply(chat_id, "О ком? Например: /who Серик")
         return _reply(chat_id, await secretary(command[1:], arg[:1000]))
     if command in ("/diary", "/дневник"):
         return await _diary_command(chat_id, update_id, text, settings, db, process, now)

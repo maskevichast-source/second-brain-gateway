@@ -74,7 +74,7 @@ def test_telegram_secretary_commands(tg):
     assert "Просрочено" in send(client, update("/day", uid=2)).json()["text"]
     assert "Обзор недели" in send(client, update("/week", uid=3)).json()["text"]
     assert "Брифинг: Серик" in send(client, update("/brief серик", uid=4)).json()["text"]
-    assert "С кем встреча" in send(client, update("/brief", uid=5)).json()["text"]
+    assert "О ком?" in send(client, update("/brief", uid=5)).json()["text"]
     assert "Напиши вопрос" in send(client, update("/ask", uid=6)).json()["text"]
     answer = send(client, update("/ask что я обещал Серику?", uid=7)).json()["text"]
     assert "Серику обещал смету" in answer and "Источники" in answer

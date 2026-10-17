@@ -564,8 +564,12 @@ def create_app(
         if kind == "remember":
             back = review_module.format_resurface(review_module.pick_resurface(notes, now.date(), count=3, min_age=14), now.date())
             return back or "Пока нет достаточно старых идей и хотелок, чтобы вспомнить."
-        if kind == "brief":
+        if kind in ("brief", "who"):
             return review_module.build_brief(notes, arg, now, ada_text)
+        if kind == "radar":
+            return review_module.build_radar(notes, now.date())
+        if kind == "promises":
+            return review_module.build_promises(notes, now.date())
         result = await ask_module.answer_question(
             settings, notes, arg, now, llm=lambda cfg, **kw: ask_llm(cfg, **kw), ada_text=ada_text,
             expander=expand_llm, index=index)

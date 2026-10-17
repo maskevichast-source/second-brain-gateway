@@ -135,6 +135,14 @@ def build_brief(notes: list[VaultNote], person: str, now: datetime, ada_text: st
         raw = parse_date(card.get("last_contact"))
         if raw:
             out.append(f"• последний контакт: {fmt_date(date.fromisoformat(raw))} ({(today - date.fromisoformat(raw)).days} дн. назад)")
+        extra = []
+        if str(card.get("orbit")).strip() in ORBITS:
+            extra.append(f"круг: {ORBITS[str(card.get('orbit')).strip()]}")
+        if card.get("partner"):
+            extra.append(f"партнёр: {one_line(str(card.get('partner')), 60)}")
+        if as_list(card.get("children")):
+            extra.append("дети: " + ", ".join(as_list(card.get("children"))[:5]))
+        out += [f"• {e}" for e in extra]
         bday = str(card.get("birthday")).strip()
         if bday:
             out.append(f"• день рождения: {bday}")
@@ -155,13 +163,14 @@ def build_brief(notes: list[VaultNote], person: str, now: datetime, ada_text: st
                 tail = f" — {one_line(str(n.get('topic')), 80)}"
             out.append(f"• {n.created[:10]}: {n.title}{tail}")
 
-    tasks = [n for n in related if n.type == "task" and str(n.get("status")) not in ("сделано", "отменено", "отложено")]
+    tasks = [n for n in related if n.type == "task" and str(n.get("status")) not in CLOSED]
     if tasks:
         out += ["", "Открытые дела с этим человеком:"]
         for n in tasks[:8]:
             due = parse_date(n.get("due"))
+            mark = {"я": " — я обещал", "мне": " — мне обещали"}.get(str(n.get("promise")), "")
             out.append(f"• {n.title}" + (f" (до {fmt_date(date.fromisoformat(due))})" if due else "")
-                       + (" — жду ответа" if str(n.get("status")) == "ждёт" else ""))
+                       + mark + (" — жду ответа" if str(n.get("status")) == "ждёт" else ""))
 
     others = [n for n in related if n.type not in ("interaction", "task", "person")]
     if others:
@@ -170,6 +179,81 @@ def build_brief(notes: list[VaultNote], person: str, now: datetime, ada_text: st
     money = [n for n in related if n.type in ("document", "case")]
     if money and ada_text:
         out += ["", "Есть документы или дела — сверьтесь с финансами:", ada_text.splitlines()[0]]
+    return "\n".join(out)
+
+
+# ---------- Круги общения, радар и обещания ----------
+
+CLOSED = ("сделано", "отменено", "отложено")
+ORBITS = {"0": "семья", "1": "ближний", "2": "соратники", "3": "эксперты", "4": "сеть"}
+ORBIT_DAYS = {"0": 3, "1": 14, "2": 30, "3": 90, "4": 180}
+
+
+def build_radar(notes: list[VaultNote], today: date, limit: int = 10) -> str:
+    """Люди из кругов, с кем контакт просрочен. Срок: cadence_days в карточке или по кругу (0: 3 дня … 4: 180)."""
+    last: dict[str, date] = {}
+    for n in notes:
+        if n.type != "interaction":
+            continue
+        day = _created(n)
+        for name in n.people:
+            if day and (name.lower() not in last or day > last[name.lower()]):
+                last[name.lower()] = day
+    rows = []
+    for card in (n for n in notes if n.type == "person"):
+        orbit = str(card.get("orbit")).strip()
+        try:
+            cadence = int(float(str(card.get("cadence_days")))) if str(card.get("cadence_days")).strip() else ORBIT_DAYS.get(orbit)
+        except ValueError:
+            cadence = ORBIT_DAYS.get(orbit)
+        if not cadence:
+            continue
+        seen = [d for d in (parse_date(card.get("last_contact")),) if d]
+        days = [date.fromisoformat(d) for d in seen]
+        for key in {card.title.lower(), str(card.get("name")).lower(), *[a.lower() for a in as_list(card.get("aliases"))]}:
+            if key in last:
+                days.append(last[key])
+        latest = max(days) if days else None
+        age = (today - latest).days if latest else None
+        if age is None or age > cadence:
+            rows.append(((age if age is not None else 10_000) - cadence, card.title, orbit, cadence, age))
+    if not rows:
+        return "Радар чист: все, кому ты задал круг или срок, на связи вовремя. Круг задаётся в карточке полем orbit (0–4) или cadence_days."
+    rows.sort(reverse=True)
+    out = ["Давно не общались:"]
+    for _, name, orbit, cadence, age in rows[:limit]:
+        when = "контактов не записано" if age is None else f"{age} дн. назад"
+        circle = f", круг «{ORBITS[orbit]}»" if orbit in ORBITS else ""
+        out.append(f"• {name} — {when} (нужно раз в {cadence} дн.{circle})")
+    return "\n".join(out)
+
+
+def build_promises(notes: list[VaultNote], today: date) -> str:
+    """Открытые обещания: что я обещал и что обещали мне (поле promise у дел)."""
+    groups: dict[str, list[VaultNote]] = {"я": [], "мне": []}
+    for n in notes:
+        if n.type == "task" and str(n.get("status")) not in CLOSED and str(n.get("promise")) in groups:
+            groups[str(n.get("promise"))].append(n)
+    if not groups["я"] and not groups["мне"]:
+        return "Открытых обещаний нет. Скажи боту, например: «пообещал Арману скинуть контакт во вторник» — он отметит это обещание."
+
+    def line(n: VaultNote) -> str:
+        due = parse_date(n.get("due"))
+        who = f" ({', '.join(n.people[:2])})" if n.people else ""
+        tail = ""
+        if due:
+            day = date.fromisoformat(due)
+            tail = f" — до {fmt_date(day)}" + (" ⚠ просрочено" if day < today else "")
+        return f"• {n.title}{who}{tail}"
+
+    def key(n: VaultNote):
+        return parse_date(n.get("due")) or "9999"
+
+    out = []
+    if groups["я"]:
+        out += ["🔴 Я обещал:"] + [line(n) for n in sorted(groups["я"], key=key)[:15]]
+    if groups["мне"]:
+        out += ([""] if out else []) + ["🟢 Мне обещали:"] + [line(n) for n in sorted(groups["мне"], key=key)[:15]]
     return "\n".join(out)
 
 

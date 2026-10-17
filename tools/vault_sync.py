@@ -222,6 +222,26 @@ SNAPSHOT_MAX_CHARS = 2_500_000
 _last_snapshot_hash = ""
 
 
+# Личные поля карточек: остаются только в Obsidian и на сервер не уходят.
+PRIVATE_KEYS = ("triggers", "taboo_topics", "persuasion_style", "private_notes", "psychology")
+
+
+def strip_private_keys(lines: list[str]) -> list[str]:
+    """Убирает из блока свойств личные поля вместе с их многострочными значениями."""
+    out, skipping = [], False
+    for line in lines:
+        key = line.split(":", 1)[0].strip().lower() if ":" in line and not line[:1].isspace() and not line.startswith("-") else ""
+        if key:
+            skipping = key in PRIVATE_KEYS
+        elif skipping and not (line[:1].isspace() or line.lstrip().startswith("-")) and line.strip() not in ("", "---"):
+            skipping = False
+        if line.strip() == "---":
+            skipping = False
+        if not skipping:
+            out.append(line)
+    return out
+
+
 def build_snapshot_corpus(vault: Path) -> str:
     """Только блоки свойств заметок (без текстов и без приватных): этого хватает срезу на сервере."""
     parts = []
@@ -242,7 +262,7 @@ def build_snapshot_corpus(vault: Path) -> str:
         lines, end = parsed
         if "".join(lines[1:end]).lower().find("private: true") != -1:
             continue
-        parts.append("".join(lines[: end + 1]).replace("\r\n", "\n"))
+        parts.append("".join(strip_private_keys(lines[: end + 1])).replace("\r\n", "\n"))
     corpus = "\n=====NOTE=====\n".join(parts)
     return corpus if len(corpus) <= SNAPSHOT_MAX_CHARS else ""
 
