@@ -7,7 +7,7 @@
 
 Исключение: заметки, пришедшие через Telegram, лежат в очереди `outbox`, пока их не заберёт
 ноутбук или телефон (`/pending`, затем `/ack` удаляет). Если никто не забрал, они стираются
-через OUTBOX_TTL_DAYS (14 дней). Также до 24 часов хранится текст, который ждёт уточнения.
+через OUTBOX_TTL_DAYS (45 дней). Также до 24 часов хранится текст, который ждёт уточнения.
 """
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS tg_pending (
 
 
 class Database:
-    def __init__(self, path: Path, ttl_hours: float = 24.0, outbox_ttl_days: float = 14.0):
+    def __init__(self, path: Path, ttl_hours: float = 24.0, outbox_ttl_days: float = 45.0):
         self.path = Path(path)
         self.ttl = timedelta(hours=ttl_hours)
         self.outbox_ttl = timedelta(days=outbox_ttl_days)

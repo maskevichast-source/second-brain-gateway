@@ -33,7 +33,7 @@ class Settings:
     max_context_chars: int = 8000
     telegram_secret: str = ""
     telegram_allowed_ids: frozenset = frozenset()
-    outbox_ttl_days: float = 14.0
+    outbox_ttl_days: float = 45.0
     ada_summary_url: str = ""
     ada_summary_token: str = field(default="", repr=False)
     telegram_bot_token: str = field(default="", repr=False)
@@ -87,7 +87,7 @@ def load_settings() -> Settings:
         ask_budget_chars=int(os.environ.get("ASK_BUDGET_CHARS", "80000")),
         telegram_secret=secret,
         telegram_allowed_ids=allowed,
-        outbox_ttl_days=float(os.environ.get("OUTBOX_TTL_DAYS", "14")),
+        outbox_ttl_days=float(os.environ.get("OUTBOX_TTL_DAYS", "45")),
         ada_summary_url=os.environ.get("ADA_SUMMARY_URL", "").strip(),
         ada_summary_token=os.environ.get("ADA_SUMMARY_TOKEN", "").strip(),
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
