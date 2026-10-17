@@ -422,6 +422,22 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
     return report
 
 
+def _name_variants(front: dict, name: str) -> list[str]:
+    """Псевдонимы человека: свои из карточки плюс «Имя Фамилия» и «Фамилия Имя» из полей имени."""
+    first, last = str(front.get("first_name") or "").strip(), str(front.get("last_name") or "").strip()
+    found = as_list(front.get("aliases"))
+    full = str(front.get("name") or "").strip()
+    if full:
+        found.append(full)
+    if first and last:
+        found += [f"{first} {last}", f"{last} {first}"]
+    out: list[str] = []
+    for item in found:
+        if _norm_name(item) != _norm_name(name) and item not in out:
+            out.append(item)
+    return out
+
+
 def build_profile(vault: Path) -> dict:
     """Собирает то, что уходит на сервер: текст файла «Профиль.md» и список людей (имя, роль, псевдонимы)."""
     context = ""
@@ -443,8 +459,8 @@ def build_profile(vault: Path) -> dict:
             role = str(front.get("relation") or front.get("relation_group") or "").strip()
             if role == "[]":
                 role = ""
-            people.append({"name": str(front.get("title") or path.stem).strip() or path.stem,
-                           "role": role, "aliases": as_list(front.get("aliases"))})
+            name = split_title(str(front.get("title") or path.stem))[0] or path.stem
+            people.append({"name": name, "role": role, "aliases": _name_variants(front, name)})
     return {"context": context, "people": people}
 
 

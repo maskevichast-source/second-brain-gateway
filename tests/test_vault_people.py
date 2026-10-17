@@ -105,3 +105,19 @@ def test_push_option_posts_profile(tmp_path, monkeypatch):
     assert vp.main([str(vault), "--push", "https://x.example", "--token", "T"]) == 0
     assert sent["url"] == "https://x.example" and sent["token"] == "T" and "текст" in sent["payload"]["context"]
     assert vp.main([str(vault), "--push", "https://x.example", "--token", ""]) == 1
+
+
+def test_build_profile_strips_description_and_adds_name_variants(tmp_path):
+    folder = tmp_path / "1-Люди"
+    folder.mkdir()
+    (folder / "Диана.md").write_text(
+        '---\ntitle: "Диана Шангараева — супруга"\ntype: "person"\nname: "Шангараева Диана Дамировна"\n'
+        'first_name: "Диана"\nlast_name: "Шангараева"\nrelation: "супруга"\n---\n', encoding="utf-8")
+    person = vp.build_profile(tmp_path)["people"][0]
+    assert person["name"] == "Диана Шангараева"
+    assert person["role"] == "супруга"
+    assert "Шангараева Диана" in person["aliases"] and "Шангараева Диана Дамировна" in person["aliases"]
+    from app import people
+    index = people.build_index([person])
+    assert not people.is_new("Диана Шангараева", index)
+    assert not people.is_new("Диана", index)

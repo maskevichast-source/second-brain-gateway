@@ -265,6 +265,30 @@ def push_snapshot(url: str, token: str, vault: Path) -> str:
     return "sent"
 
 
+_last_profile_hash = ""
+
+
+def push_profile_to_server(url: str, token: str, vault: Path) -> str:
+    """Отправляет серверу список людей (имя, роль, псевдонимы), чтобы бот не переспрашивал про тех, кто уже есть."""
+    global _last_profile_hash
+    try:
+        import vault_people
+        payload = vault_people.build_profile(vault)
+    except ImportError:
+        return "skipped"
+    if not payload.get("context"):
+        payload.pop("context", None)            # пустой «Профиль.md» не должен стирать профиль на сервере
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    if digest == _last_profile_hash or not payload.get("people"):
+        return "same"
+    try:
+        api(url, token, "/profile", payload)
+    except (urllib.error.URLError, OSError, ValueError):
+        return "failed"
+    _last_profile_hash = digest
+    return "sent"
+
+
 def organize_after_sync(vault: Path, fresh: bool = False) -> None:
     """Раскладка и связи для новых заметок (tools/vault_organize.py) и карточки людей. Сбой не мешает очереди."""
     try:
@@ -352,6 +376,8 @@ def main(argv=None) -> int:
             saved = sync_once(args.url, args.token, vault)
             if not args.no_organize:
                 organize_after_sync(vault, fresh=bool(saved))
+            if not args.no_organize and push_profile_to_server(args.url, args.token, vault) == "sent":
+                print("  список людей для бота обновлён")
             if not args.no_snapshot:
                 state = push_snapshot(args.url, args.token, vault)
                 if state == "sent":
