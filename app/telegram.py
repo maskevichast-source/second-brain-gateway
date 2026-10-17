@@ -187,6 +187,14 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     if command == "/push":
         return _reply(chat_id, _push_command(text, db, settings))
     command = {"/кто": "/who", "/радар": "/radar", "/обещания": "/promises", "/долги": "/promises"}.get(command, command)
+    if not command and len(text) <= 80:               # живая речь вместо команд: «давай дальше интервью», «стоп»
+        low = text.lower()
+        if "интервью" in low and re.search(r"продолж|дальше|давай|начн|запуст|вернись|вернём|вернемся|вернёмся", low):
+            command, text = "/interview", "/interview"
+        elif re.match(r"^(стоп|хватит|пауза|остановись|останови)\W*$", low):
+            current = db.get_state(chat_id)
+            if current and current[0] in ("interview", "person", "diary"):
+                command, text = "/stop", "/stop"
     if command in ("/ask", "/day", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
@@ -491,6 +499,7 @@ def _interview_start(chat_id: int, db: Database, arg: str = "") -> dict:
     old = state[1] if state and state[0] == "interview" else {}
     if state and state[0] == "person" and state[1].get("resume"):
         old = state[1]["resume"]
+    old = old or db.interview_progress()
     arg = arg.strip().lower()
     if arg in ("блоки", "темы", "список"):
         return _reply(chat_id, interview.blocks_text())
@@ -507,7 +516,7 @@ def _interview_start(chat_id: int, db: Database, arg: str = "") -> dict:
                 return _reply(chat_id, "Не знаю такого блока.\n\n" + interview.blocks_text())
             data = {"i": 0, "saved": old.get("saved", 0), "queue": interview.block_indices(block)}
     else:
-        data = dict(old) if old else {"i": 0, "saved": 0}
+        data = dict(old or db.interview_progress() or {"i": 0, "saved": 0})   # место хранится и вне диалога: дневник его не стирает
     queue = _queue(data)
     position = int(data.get("i", 0))
     if position >= len(queue):
@@ -553,6 +562,7 @@ async def _interview_step(chat_id, update_id, text, command, data, db, process, 
         note += f"📚 Блок «{current_block}» собран в одну заметку.\n"
     if finished:
         db.clear_state(chat_id)
+        db.clear_interview_progress()
         return _reply(chat_id, f"{note}Интервью закончено. Всего заметок: {saved}. "
                                "Когда телефон или ноутбук заберёт очередь, они появятся в хранилище. "
                                "Другие блоки: /interview блоки.")

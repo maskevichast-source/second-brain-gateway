@@ -442,11 +442,50 @@ class Database:
                  datetime.now(timezone.utc).isoformat(timespec="seconds")),
             )
             conn.commit()
+        if kind == "interview":                    # место в интервью хранится отдельно: другие диалоги его не затрут
+            self.set_setting("interview_progress", json.dumps({**data, "paused": False}, ensure_ascii=False))
+
+    # сколько минут вопрос ждёт ответа, прежде чем бот перестанет принимать за него обычные сообщения
+    STATE_IDLE_MINUTES = {"person": 30, "diary": 180, "interview": 180}
 
     def get_state(self, chat_id: int) -> tuple[str, dict] | None:
         with closing(self._connect()) as conn:
-            row = conn.execute("SELECT kind, data FROM tg_state WHERE chat_id = ?", (chat_id,)).fetchone()
-        return (row["kind"], json.loads(row["data"])) if row else None
+            row = conn.execute("SELECT kind, data, created_at FROM tg_state WHERE chat_id = ?", (chat_id,)).fetchone()
+        if not row:
+            return None
+        kind, data = row["kind"], json.loads(row["data"])
+        limit = self.STATE_IDLE_MINUTES.get(kind)
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(row["created_at"])).total_seconds() / 60
+        except (TypeError, ValueError):
+            age = 0
+        if limit and age > limit:
+            if kind == "person":                   # давно не отвечал про человека: вопрос снимаем, интервью возвращаем на паузе
+                resume = data.get("resume")
+                if resume:
+                    self.set_state(chat_id, "interview", {**resume, "paused": True})
+                    return self.get_state(chat_id)
+                self.clear_state(chat_id)
+                return None
+            if kind == "interview" and not data.get("paused"):
+                data = {**data, "paused": True}    # долгая тишина: обычные записи снова идут как записи
+                self.set_state(chat_id, "interview", data)
+                return ("interview", data)
+            if kind == "diary":
+                self.clear_state(chat_id)
+                return None
+        return (kind, data)
+
+    def interview_progress(self) -> dict:
+        raw = self.get_setting("interview_progress", "")
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def clear_interview_progress(self) -> None:
+        self.set_setting("interview_progress", "")
 
     def clear_state(self, chat_id: int) -> None:
         with closing(self._connect()) as conn:

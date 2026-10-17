@@ -414,3 +414,51 @@ def test_photo_with_caption_and_bare_document_are_saved_without_questions(tg):
     d["message"].pop("text")
     send(client, d)
     assert "Вложение в Telegram: файл «договор.pdf»" in llm.calls[1]["content"]
+
+
+def test_diary_does_not_erase_interview_place(tg):
+    client = tg()
+    send(client, update("/interview", uid=1))
+    send(client, update("ответ один", uid=2))
+    send(client, update("ответ два", uid=3))
+    send(client, update("/diary", uid=4))
+    send(client, update("/stop", uid=5))
+    again = send(client, update("/interview", uid=6)).json()["text"]
+    assert "Продолжаем интервью" in again and "[3/" in again
+
+
+def test_live_phrases_continue_and_stop_interview(tg):
+    client = tg()
+    send(client, update("/interview", uid=1))
+    send(client, update("ответ", uid=2))
+    assert "остановил" in send(client, update("Стоп", uid=3)).json()["text"].lower()
+    text = send(client, update("Давай дальше интервью", uid=4)).json()["text"]
+    assert "Продолжаем интервью" in text and "[2/" in text
+    assert "Сохранять нечего" not in text
+
+
+def test_long_answer_in_interview_stays_an_answer(tg):
+    client = tg()
+    send(client, update("/interview", uid=1))
+    long_answer = "Проживаю в ЖК, номера служб: " + "очень длинный ответ " * 40
+    text = send(client, update(long_answer, uid=2)).json()["text"]
+    assert "[2/" in text
+
+
+def test_stale_questions_stop_swallowing_messages(tmp_path):
+    import sqlite3
+
+    from app.db import Database
+
+    db = Database(tmp_path / "t.db")
+    db.init()
+    db.set_state(1, "person", {"current": "Х", "rest": [], "resume": {"i": 4, "saved": 1}})
+    old = "2020-01-01T00:00:00+00:00"
+    with sqlite3.connect(tmp_path / "t.db") as conn:
+        conn.execute("UPDATE tg_state SET created_at = ?", (old,))
+    state = db.get_state(1)
+    assert state[0] == "interview" and state[1]["paused"] and state[1]["i"] == 4
+    with sqlite3.connect(tmp_path / "t.db") as conn:
+        conn.execute("UPDATE tg_state SET kind = 'diary', created_at = ?", (old,))
+    assert db.get_state(1) is None
+    assert db.interview_progress()["i"] == 4
