@@ -437,6 +437,7 @@ def organize(vault: Path, dry_run: bool = False, refresh_all: bool = False, now:
         write_health_report(vault, notes, index)
     if not dry_run:
         ensure_dashboard(vault)
+        report["folders"] = ensure_folders(vault)
     return report
 
 
@@ -458,6 +459,21 @@ SORT created DESC
 LIMIT 40
 ```
 """
+
+
+def ensure_folders(vault: Path) -> list[str]:
+    """Создаёт пустые папки раскладки заранее, чтобы они были видны в Obsidian. Возвращает созданные."""
+    wanted = sorted(set(DEFAULT_FOLDERS.values()) - {"6-Дневник"} | {"6-Дневник", "7-Исходники", INBOX, PEOPLE_DIR, ARCHIVE_DIR})
+    created = []
+    for rel in wanted:
+        path = vault / rel
+        if not path.exists():
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                created.append(rel)
+            except OSError:
+                pass
+    return created
 
 
 def ensure_dashboard(vault: Path) -> None:
@@ -515,7 +531,7 @@ def main(argv=None) -> int:
         return 1
     report = organize(vault, dry_run=args.dry_run, refresh_all=args.all)
     for key, title in (("filed", "разложено"), ("archived", "в архив"), ("linked", "связи обновлены"),
-                       ("kept", "оставлено в 0-Inbox на проверку"), ("errors", "ошибки")):
+                       ("folders", "создана папка"), ("kept", "оставлено в 0-Inbox на проверку"), ("errors", "ошибки")):
         for row in report.get(key, []):
             print(f"  {title}: {row}")
     print("Готово." if not args.dry_run else "Это пробный запуск, ничего не изменено.")

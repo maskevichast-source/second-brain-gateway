@@ -218,7 +218,7 @@ def organize_after_sync(vault: Path, fresh: bool = False) -> None:
     try:
         import vault_organize
         report = vault_organize.organize(vault, settle=0 if fresh else vault_organize.SETTLE_SECONDS)
-        for key, title in (("filed", "разложено"), ("archived", "в архив"), ("linked", "связи"), ("errors", "ошибка")):
+        for key, title in (("folders", "создана папка"), ("filed", "разложено"), ("archived", "в архив"), ("linked", "связи"), ("errors", "ошибка")):
             for row in report.get(key, []):
                 print(f"  {title}: {row}")
     except ImportError:

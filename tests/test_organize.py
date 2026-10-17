@@ -174,3 +174,11 @@ def test_organizer_is_stdlib_only():
             for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in (getattr(n, "names", None) or [n])}
     assert mods <= {"__future__", "argparse", "json", "math", "os", "re", "sys", "time", "collections", "dataclasses",
                     "datetime", "pathlib"}
+
+
+def test_empty_target_folders_are_created_up_front(tmp_path):
+    rep = run(tmp_path)
+    for name in ("4-Дела/Дела и события", "2-Знания/Медиа", "5-Дом и жизнь/Дом", "6-Дневник", "7-Исходники", "0-Inbox"):
+        assert (tmp_path / name).is_dir(), name
+    assert "7-Исходники" in rep["folders"]
+    assert run(tmp_path)["folders"] == []                # повторно ничего не создаёт
