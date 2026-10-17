@@ -149,3 +149,35 @@ def test_facts_join_context_and_feed_voice_hint(tmp_path):
     assert "Янка" in hint and "Диана" in hint
     db.clear_profile()
     assert db.get_facts() == [] and db.get_context() == ""
+
+
+def test_interview_position_survives_person_question(tmp_path):
+    import asyncio
+
+    from app import telegram
+    from app.db import Database
+
+    db = Database(tmp_path / "t.db")
+    db.init()
+    db.set_state(1, "interview", {"i": 20, "saved": 3})
+    telegram._ask_person(1, db, ["Ерасыл", "Виктор"], "ok")
+    state = db.get_state(1)
+    assert state[0] == "person" and state[1]["resume"]["i"] == 20
+
+    reply = asyncio.run(telegram._person_step(1, 5, "", "/skip", state[1], db, None, None))
+    assert state[1]["rest"] == ["Виктор"] and db.get_state(1)[1]["resume"]["i"] == 20 and "Виктор" in reply["text"]
+    reply = asyncio.run(telegram._person_step(1, 6, "", "/skip", db.get_state(1)[1], db, None, None))
+    restored = db.get_state(1)
+    assert restored[0] == "interview" and restored[1]["i"] == 20 and not restored[1].get("paused")
+    assert "Продолжаем интервью" in reply["text"]
+
+
+def test_interview_jump_to_number(tmp_path):
+    from app import telegram
+    from app.db import Database
+
+    db = Database(tmp_path / "t.db")
+    db.init()
+    db.set_state(1, "person", {"current": "X", "rest": [], "resume": {"i": 3, "saved": 2}})
+    text = telegram._interview_start(1, db, "22")["text"]
+    assert db.get_state(1)[0] == "interview" and db.get_state(1)[1]["i"] == 21 and "[22/" in text

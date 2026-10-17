@@ -144,12 +144,29 @@ async def _save(db: Database, process: Processor, *, capture_id: str, content: s
     return response
 
 
+def _leave_person(chat_id: int, db: Database, resume: dict | None, paused: bool = False) -> None:
+    """Снимает вопрос про человека и возвращает прерванное интервью на то же место."""
+    if resume:
+        db.set_state(chat_id, "interview", {**resume, "paused": paused or resume.get("paused", False)})
+    else:
+        db.clear_state(chat_id)
+
+
 def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str) -> str:
     """Запоминает новых людей и возвращает текст вопроса про первого из них."""
     for name in names:
         db.upsert_person(name)               # чтобы не переспрашивать про того же человека снова
     current, rest = names[0], names[1:4]
-    db.set_state(chat_id, "person", {"current": current, "rest": rest})
+    state = db.get_state(chat_id)
+    resume = None                            # интервью не должно теряться, пока идёт вопрос про человека
+    if state and state[0] == "interview":
+        resume = state[1]
+    elif state and state[0] == "person":
+        resume = state[1].get("resume")
+    data = {"current": current, "rest": rest}
+    if resume:
+        data["resume"] = resume
+    db.set_state(chat_id, "person", data)
     return (f"{prefix}\n\nКто такой(ая) {current}? Напиши роль и что знаешь (телефон, где работает, "
             "день рождения) одним сообщением или /skip.")
 
@@ -221,6 +238,9 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         if state and state[0] == "interview":
             db.set_state(chat_id, "interview", {**state[1], "paused": True})
             return _reply(chat_id, "Остановил. /interview продолжит с того же места.")
+        if state and state[0] == "person" and state[1].get("resume"):
+            _leave_person(chat_id, db, state[1]["resume"], paused=True)
+            return _reply(chat_id, "Остановил. /interview продолжит с того же места.")
         db.clear_state(chat_id)
         return _reply(chat_id, "Ок, остановил.")
     if command == "/interview":
@@ -233,14 +253,15 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     if state and state[0] == "diary" and command in ("", "/skip", "/done"):
         return await _diary_step(chat_id, update_id, text, command, state[1], settings, db, process, now)
     # Ответ на вопрос про нового человека или интервью. Длинное сообщение или ссылка считаются новой записью.
-    if state and not (command == "" and (len(text) > 400 or _URL.search(text))) and command in ("", "/skip"):
+    in_interview = bool(state and state[0] == "interview")   # в интервью длинный ответ остаётся ответом, а не новой записью
+    if state and not (command == "" and not in_interview and (len(text) > 400 or _URL.search(text))) and command in ("", "/skip"):
         kind, data = state
         if kind == "interview":
             return await _interview_step(chat_id, update_id, text, command, data, db, process, settings, now)
         if kind == "person":
             return await _person_step(chat_id, update_id, text, command, data, db, process, settings)
     if state and command == "" and state[0] == "person":
-        db.clear_state(chat_id)               # ушёл в новую запись: вопрос про человека снимаем (интервью остаётся)
+        _leave_person(chat_id, db, state[1].get("resume"))   # ушёл в новую запись: вопрос про человека снимаем, интервью остаётся
 
     waiting = db.get_waiting(chat_id)
     if command == "/skip":
@@ -447,7 +468,12 @@ async def _person_step(chat_id, update_id, text, command, data, db, process, set
         prefix = f"Ок, пропустил {current}."
     if rest:
         return _reply(chat_id, _ask_person(chat_id, db, rest, prefix))
-    db.clear_state(chat_id)
+    resume = data.get("resume")
+    _leave_person(chat_id, db, resume)
+    if resume:
+        queue = _queue(resume)
+        position = min(int(resume.get("i", 0)), len(queue) - 1)
+        prefix += "\n\nПродолжаем интервью.\n" + interview.question_text(queue[position], position, len(queue))
     return _reply(chat_id, prefix)
 
 
@@ -463,10 +489,16 @@ def _queue(data: dict) -> list[int]:
 def _interview_start(chat_id: int, db: Database, arg: str = "") -> dict:
     state = db.get_state(chat_id)
     old = state[1] if state and state[0] == "interview" else {}
+    if state and state[0] == "person" and state[1].get("resume"):
+        old = state[1]["resume"]
     arg = arg.strip().lower()
     if arg in ("блоки", "темы", "список"):
         return _reply(chat_id, interview.blocks_text())
-    if arg:
+    if arg.isdigit():                        # /interview 22: перейти к вопросу с этим номером
+        data = {k: v for k, v in old.items() if k != "paused"} or {"i": 0, "saved": 0}
+        total = len(_queue(data))
+        data["i"] = max(0, min(int(arg) - 1, total - 1))
+    elif arg:
         if arg in ("все", "всё", "заново", "сначала"):
             data = {"i": 0, "saved": old.get("saved", 0)}
         else:
