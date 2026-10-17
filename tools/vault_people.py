@@ -11,6 +11,8 @@
 Только стандартная библиотека Python 3.9+. Запуск:
     python vault_people.py "C:\\путь\\к\\SecondBrain"            # создать и обновить
     python vault_people.py "C:\\путь\\к\\SecondBrain" --dry-run   # только показать, что будет
+    python vault_people.py "C:\\путь\\к\\SecondBrain" --tidy      # план: склеить дубли «Имя» и «Имя — описание»
+    python vault_people.py "C:\\путь\\к\\SecondBrain" --tidy --apply
     python vault_people.py "C:\\путь\\к\\SecondBrain" --push https://ТВОЙ-АДРЕС   # ещё и отправить профиль и имена людей на сервер
 """
 from __future__ import annotations
@@ -165,7 +167,7 @@ def collect(vault: Path):
     for path, front in read_notes(vault):
         in_people = path.relative_to(vault).parts[0] == PEOPLE_DIR
         if str(front.get("type")) == "person":
-            title = safe_name(str(front.get("title") or path.stem))
+            title = safe_name(split_title(str(front.get("title") or path.stem))[0])
             if not title:
                 continue
             if in_people:
@@ -190,6 +192,20 @@ def collect(vault: Path):
             if name:
                 names.setdefault(name, set())
     return names, facts, cards
+
+
+_DASH = re.compile(r"\s+[—–-]\s+")
+_PLAIN_DESC = {"профиль", "карточка", "заметка"}
+
+
+def split_title(title: str) -> tuple[str, str]:
+    """'Ануар — друг, работает в комитете' -> ('Ануар', 'друг, работает в комитете')."""
+    parts = _DASH.split(title.strip(), maxsplit=1)
+    return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
+
+
+def _norm_name(name: str) -> str:
+    return re.sub(r"\s+", " ", name.casefold().replace("ё", "е")).strip()
 
 
 # ---------- запись карточек ----------
@@ -281,6 +297,131 @@ def run(vault: Path, dry_run: bool = False, now: datetime | None = None) -> dict
     return report
 
 
+# ---------- наведение порядка в 1-Люди ----------
+
+DUP_DIR = "3-Архив/Люди-дубли"
+_DATAVIEW = re.compile(r"```dataview.*?```", re.S)
+
+
+def _facts_from_front(front: dict, desc: str) -> dict[str, list[str]]:
+    fact: dict[str, list[str]] = {}
+    for key in SCALARS:
+        value = str(front.get(key) or "").strip()
+        if value and value != "[]":
+            fact[key] = [value]
+    for key in LISTS:
+        values = as_list(front.get(key))
+        if values:
+            fact[key] = values
+    if desc and _norm_name(desc) not in _PLAIN_DESC:
+        fact.setdefault("relation", [desc.split(",")[0].strip()])
+        fact.setdefault("notes", [desc])
+    return fact
+
+
+def _useful_body(body: str) -> str:
+    text = _DATAVIEW.sub("", body or "").strip()
+    text = re.sub(r"^#\s+.*\n?", "", text).strip()          # заголовок карточки
+    text = re.sub(r"^##\s+(Связанные дела|Контакты и разговоры|Всё, где упомянут\(а\))\s*$", "", text, flags=re.M).strip()
+    return text
+
+
+def _set_title(text: str, name: str) -> str:
+    parts = split_front(text)
+    if not parts:
+        return text
+    front_lines, body = parts
+    for i, line in enumerate(front_lines):
+        if line.startswith("title:"):
+            front_lines[i] = f"title: {q(name)}"
+            break
+    return "---\n" + "\n".join(front_lines) + "\n---\n" + body
+
+
+def _unique(folder: Path, name: str) -> Path:
+    path, n = folder / name, 2
+    while path.exists():
+        path = folder / f"{Path(name).stem}-{n}{Path(name).suffix}"
+        n += 1
+    return path
+
+
+def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
+    """Склеивает «Имя» и «Имя — описание» в одну карточку. Дубли не удаляются, а уезжают в 3-Архив/Люди-дубли.
+
+    Без apply только описывает, что будет сделано. Похожие, но не совпадающие имена (опечатки) только перечисляются.
+    """
+    report = {"merged": [], "renamed": [], "moved": [], "similar": [], "foreign": []}
+    folder = vault / PEOPLE_DIR
+    if not folder.is_dir():
+        return report
+    groups: dict[str, list[dict]] = {}
+    for path in sorted(folder.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        parts = split_front(text)
+        if not parts:
+            continue
+        front, body = parse_front(parts[0]), parts[1]
+        if str(front.get("type") or "") != "person":
+            report["foreign"].append(path.name)
+            continue
+        raw_title = str(front.get("title") or path.stem)
+        name, desc = split_title(raw_title)
+        name = safe_name(name)
+        if not name:
+            continue
+        groups.setdefault(_norm_name(name), []).append(
+            {"path": path, "text": text, "front": front, "body": body, "name": name, "desc": desc,
+             "plain": not desc and safe_name(path.stem) == name})
+    for entries in groups.values():
+        if len(entries) == 1 and not entries[0]["desc"] and entries[0]["plain"]:
+            continue
+        primary = next((e for e in entries if e["plain"]), None) or next((e for e in entries if not e["desc"]), None)
+        rest = [e for e in entries if e is not primary]
+        target_name = (primary or entries[0])["name"]
+        if primary is None:                                  # все с описаниями: первая становится карточкой
+            primary, rest = entries[0], entries[1:]
+            primary = {**primary, "text": _set_title(primary["text"], target_name), "rename": True}
+            fact = _facts_from_front(primary["front"], primary["desc"])
+            new_text, _ = merge_into_card(primary["text"], fact)
+            primary["text"] = new_text
+        text = primary["text"]
+        for dup in rest:
+            fact = _facts_from_front(dup["front"], dup["desc"])
+            text, _ = merge_into_card(text, fact)
+            extra = _useful_body(dup["body"])
+            if extra and extra not in text:
+                text = text.rstrip("\n") + f"\n\n## Из заметки «{dup['path'].stem}»\n\n{extra}\n"
+        if primary.get("rename"):
+            report["renamed"].append(f"{primary['path'].stem} -> {target_name}")
+        for dup in rest:
+            report["merged"].append(f"{dup['path'].stem} -> {target_name}")
+        if apply:
+            target = folder / f"{target_name}.md"
+            if primary.get("rename") and target.exists() and target != primary["path"]:
+                target = _unique(folder, f"{target_name}.md")
+            target.write_text(text, encoding="utf-8", newline="\n")
+            if primary["path"] != target:
+                primary["path"].unlink()
+            archive = vault / Path(DUP_DIR)
+            for dup in rest:
+                if dup["path"] == target:
+                    continue
+                archive.mkdir(parents=True, exist_ok=True)
+                dup["path"].replace(_unique(archive, dup["path"].name))
+    names = sorted({e["name"] for es in groups.values() for e in es})
+    import difflib
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if _norm_name(a) != _norm_name(b) and " " in a and " " in b \
+                    and difflib.SequenceMatcher(None, _norm_name(a), _norm_name(b)).ratio() >= 0.88:
+                report["similar"].append(f"{a} / {b}")
+    return report
+
+
 def build_profile(vault: Path) -> dict:
     """Собирает то, что уходит на сервер: текст файла «Профиль.md» и список людей (имя, роль, псевдонимы)."""
     context = ""
@@ -320,6 +461,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Создать и обновить карточки людей в хранилище.")
     parser.add_argument("vault", help="папка хранилища SecondBrain")
     parser.add_argument("--dry-run", action="store_true", help="ничего не писать, только показать")
+    parser.add_argument("--tidy", action="store_true",
+                        help="склеить дубли «Имя» и «Имя — описание» (без --apply только покажет план)")
+    parser.add_argument("--apply", action="store_true", help="вместе с --tidy: действительно выполнить")
     parser.add_argument("--push", metavar="URL", help="после обновления отправить профиль и список людей на сервер")
     parser.add_argument("--token", default=os.environ.get("SECOND_BRAIN_TOKEN", ""))
     args = parser.parse_args(argv)
@@ -327,6 +471,16 @@ def main(argv=None) -> int:
     if not vault.is_dir():
         print(f"Папка не найдена: {vault}")
         return 1
+    if args.tidy:
+        plan = tidy(vault, apply=args.apply)
+        print(("Сделано:" if args.apply else "План (ничего не изменено, добавь --apply):"))
+        for key, title in (("merged", "склеено"), ("renamed", "переименовано"), ("similar", "похожие имена, проверь руками"),
+                           ("foreign", "не карточка человека, лежит в 1-Люди")):
+            for row in plan[key]:
+                print(f"  {title}: {row}")
+        if not any(plan.values()):
+            print("  Дублей не найдено.")
+        return 0
     report = run(vault, args.dry_run)
     prefix = "Было бы: " if args.dry_run else ""
     print(f"{prefix}новых карточек: {len(report['created'])}, дополнено: {len(report['updated'])}")

@@ -27,6 +27,7 @@ from .textutil import (
     quote_block,
     single_url,
     slugify,
+    split_person_title,
     strip_leading_yaml,
     trim_words,
     wikilink,
@@ -144,6 +145,12 @@ def normalize_note(
     body = strip_leading_yaml(raw.body).strip()
     title = trim_words(raw.title or body or fallback_body, 80) or "Заметка"
     summary = trim_words(raw.summary or title, 140)
+    person_desc = ""
+    if note_type == "person":
+        # заголовок карточки человека — только имя, иначе в 1-Люди плодятся «Имя» и «Имя — друг, …»
+        name, person_desc = split_person_title(title)
+        if name:
+            title = name
 
     # особые поля типа: только известные, приведённые к типу
     fields: dict[str, object] = {}
@@ -167,6 +174,8 @@ def normalize_note(
             if info.title and "page_title" not in fields:
                 fields["page_title"] = info.title
 
+    if person_desc and "notes" in spec.fields and "notes" not in fields:
+        fields["notes"] = one_line(person_desc, 300)
     ai_filled = [f for f in raw.ai_filled if f in schema.AI_FILLABLE and f in fields]
     priority = raw.priority if raw.priority in schema.PRIORITIES else None
 

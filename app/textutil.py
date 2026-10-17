@@ -162,3 +162,12 @@ def parse_month_day(value: object) -> str | None:
     except ValueError:
         return None
     return f"{month:02d}-{day:02d}"
+
+
+_NAME_SPLIT = re.compile(r"\s+[—–-]\s+")
+
+
+def split_person_title(title: str) -> tuple[str, str]:
+    """'Ануар — друг, работает в комитете' -> ('Ануар', 'друг, работает в комитете'). Без тире: (имя, '')."""
+    parts = _NAME_SPLIT.split(str(title or "").strip(), maxsplit=1)
+    return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
