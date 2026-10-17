@@ -182,3 +182,33 @@ def test_empty_target_folders_are_created_up_front(tmp_path):
         assert (tmp_path / name).is_dir(), name
     assert "7-Исходники" in rep["folders"]
     assert run(tmp_path)["folders"] == []                # повторно ничего не создаёт
+
+
+def test_snapshot_corpus_has_only_front_matter_skips_private_templates_and_duplicates(tmp_path):
+    put(tmp_path, "4-Дела/a.md", note("Дело А", body="СЕКРЕТНЫЙ ТЕКСТ ТЕЛА"))
+    put(tmp_path, "4-Дела/p.md", note("Приватное", extra="private: true"))
+    put(tmp_path, "Шаблоны/t.md", note("Шаблон"))
+    put(tmp_path, "3-Архив/Люди-дубли/d.md", note("Дубль", type_="person"))
+    put(tmp_path, "7-Исходники/2026-10/x.md", note("Не заметка"))
+    corpus = vault_sync.build_snapshot_corpus(tmp_path)
+    assert "Дело А" in corpus and "СЕКРЕТНЫЙ" not in corpus
+    for hidden in ("Приватное", "Шаблон", "Дубль", "Не заметка"):
+        assert hidden not in corpus
+
+
+def test_snapshot_push_sends_once_until_changed(tmp_path, monkeypatch):
+    put(tmp_path, "4-Дела/a.md", note("Дело А"))
+    sent = []
+    monkeypatch.setattr(vault_sync, "api", lambda url, token, path, body=None: sent.append((path, body)) or {})
+    monkeypatch.setattr(vault_sync, "_last_snapshot_hash", "")
+    assert vault_sync.push_snapshot("u", "t", tmp_path) == "sent" and sent[0][0] == "/snapshot"
+    assert vault_sync.push_snapshot("u", "t", tmp_path) == "same" and len(sent) == 1
+    put(tmp_path, "4-Дела/b.md", note("Дело Б"))
+    assert vault_sync.push_snapshot("u", "t", tmp_path) == "sent" and len(sent) == 2
+
+
+def test_snapshot_corpus_is_readable_by_server_parser(tmp_path):
+    from app.vault import load_notes
+    put(tmp_path, "4-Дела/a.md", note("Дело А", people=["Серик"]))
+    notes, private = load_notes(vault_sync.build_snapshot_corpus(tmp_path))
+    assert [n.title for n in notes] == ["Дело А"] and private == 0

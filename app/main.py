@@ -27,6 +27,7 @@ from . import review as review_module
 from . import scheduler as scheduler_module
 from . import snapshot as snapshot_module
 from . import stt as stt_module
+from . import webhook as webhook_module
 from . import links as links_module
 from . import people as people_module
 from . import llm as llm_module
@@ -159,15 +160,27 @@ def create_app(
     monitor_module.MONITOR.configure(db, alert_sender, settings.telegram_allowed_ids)
     limiter = RateLimiter(settings.rate_limit_per_minute)
 
+    async def webhook_guard():
+        """Сверяет вебхук Telegram при старте и раз в час (см. app/webhook.py)."""
+        while True:
+            try:
+                await webhook_module.ensure_webhook(settings)
+            except Exception as exc:  # noqa: BLE001 - сторож не должен падать
+                logger.warning("webhook guard: %s", type(exc).__name__)
+            await asyncio.sleep(3600)
+
     @asynccontextmanager
     async def lifespan(_app):
         task = None
+        guard = asyncio.create_task(webhook_guard()) if webhook_module.configured(settings) else None
         if settings.telegram_bot_token and settings.telegram_allowed_ids:
             task = asyncio.create_task(scheduler_module.run_loop(
                 db, settings, clock, scheduler_module.telegram_sender(settings)))
         yield
         if task:
             task.cancel()
+        if guard:
+            guard.cancel()
 
     snap_cache: dict = {}
 

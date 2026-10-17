@@ -12,6 +12,8 @@
 
 После каждой выгрузки запускаются vault_organize.py (раскладка по папкам и связи между заметками) и vault_people.py
 (карточки людей), если лежат рядом. Отключить: --no-organize.
+Следом на сервер уходит срез заметок (только блоки свойств, без текстов и без приватных): так сводки и ответы бота
+видят раскладку, закрытые дела и склеенных людей. Отключить: --no-snapshot.
 
 Исходники (голос, PDF, фото, скриншоты) приходят записями kind=file: скрипт скачивает файл с сервера и кладёт в
 7-Исходники/ГОД-МЕСЯЦ; пока файл не скачан, запись остаётся в очереди.
@@ -23,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -213,6 +216,55 @@ SERVICE_RU = {"closed": "дело закрыто", "already": "уже закры
               "ambiguous": "подходит несколько заметок, пропускаю", "invalid": "непонятная запись, пропускаю"}
 
 
+SNAPSHOT_SKIP_DIRS = {"Шаблоны", "Дашборды", ".obsidian", ".trash", "7-Исходники"}
+SNAPSHOT_SKIP_PATHS = ("3-Архив/Люди-дубли",)
+SNAPSHOT_MAX_CHARS = 2_500_000
+_last_snapshot_hash = ""
+
+
+def build_snapshot_corpus(vault: Path) -> str:
+    """Только блоки свойств заметок (без текстов и без приватных): этого хватает срезу на сервере."""
+    parts = []
+    for path in sorted(vault.rglob("*.md")):
+        rel = path.relative_to(vault)
+        if rel.parts[0] in SNAPSHOT_SKIP_DIRS or any(p.startswith(".") for p in rel.parts) or len(rel.parts) == 1:
+            continue
+        if str(rel.parent).replace("\\", "/").startswith(SNAPSHOT_SKIP_PATHS):
+            continue
+        try:
+            with open(path, encoding="utf-8", newline="") as handle:
+                head = handle.read(_HEAD_BYTES)
+        except (OSError, UnicodeDecodeError):
+            continue
+        parsed = _front_lines(head)
+        if not parsed or not head.startswith("---"):
+            continue
+        lines, end = parsed
+        if "".join(lines[1:end]).lower().find("private: true") != -1:
+            continue
+        parts.append("".join(lines[: end + 1]).replace("\r\n", "\n"))
+    corpus = "\n=====NOTE=====\n".join(parts)
+    return corpus if len(corpus) <= SNAPSHOT_MAX_CHARS else ""
+
+
+def push_snapshot(url: str, token: str, vault: Path) -> str:
+    """Отправляет срез на сервер, если он изменился с прошлого раза. Нужен, чтобы сводки и ответы бота
+    видели раскладку, закрытые дела и склеенных людей. Возвращает: sent | same | empty | failed."""
+    global _last_snapshot_hash
+    corpus = build_snapshot_corpus(vault)
+    if not corpus.strip():
+        return "empty"
+    digest = hashlib.sha256(corpus.encode("utf-8")).hexdigest()
+    if digest == _last_snapshot_hash:
+        return "same"
+    try:
+        api(url, token, "/snapshot", {"corpus": corpus})
+    except (urllib.error.URLError, OSError, ValueError):
+        return "failed"
+    _last_snapshot_hash = digest
+    return "sent"
+
+
 def organize_after_sync(vault: Path, fresh: bool = False) -> None:
     """Раскладка и связи для новых заметок (tools/vault_organize.py) и карточки людей. Сбой не мешает очереди."""
     try:
@@ -285,6 +337,7 @@ def main(argv=None) -> int:
     parser.add_argument("--vault", required=True, help="папка хранилища SecondBrain")
     parser.add_argument("--token", default=os.environ.get("SECOND_BRAIN_TOKEN", ""))
     parser.add_argument("--loop", type=int, default=0, help="повторять каждые N секунд (0 — один раз)")
+    parser.add_argument("--no-snapshot", action="store_true", help="не отправлять на сервер срез заметок (свойства без текстов)")
     parser.add_argument("--no-organize", action="store_true", help="не раскладывать заметки и не связывать их")
     args = parser.parse_args(argv)
     if not args.token:
@@ -299,6 +352,12 @@ def main(argv=None) -> int:
             saved = sync_once(args.url, args.token, vault)
             if not args.no_organize:
                 organize_after_sync(vault, fresh=bool(saved))
+            if not args.no_snapshot:
+                state = push_snapshot(args.url, args.token, vault)
+                if state == "sent":
+                    print("  срез для бота обновлён")
+                elif state == "failed":
+                    print("  срез для бота обновить не получилось, попробую позже")
             stamp = time.strftime("%H:%M:%S")
             print(f"[{stamp}] новых заметок: {saved}")
         except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:

@@ -124,6 +124,7 @@ def collect_items(notes: list[VaultNote], today: date) -> list[Item]:
     items: list[Item] = []
     for note in notes:
         status = str(note.get("status"))
+        task_days: set[date] = set()                 # срок и напоминание на один день: показываем один раз
         for rule in RULES:
             period = None
             if (note.type, rule.field) in (("task", "due"), ("home", "next_due")):
@@ -140,6 +141,10 @@ def collect_items(notes: list[VaultNote], today: date) -> list[Item]:
                 continue
             if day > today + timedelta(days=rule.ahead):
                 continue
+            if rule.type == "task":
+                if day in task_days:
+                    continue
+                task_days.add(day)
             extra = ", ".join(note.people[:3])
             if rule.type == "task" and rule.field == "due" and status == "ждёт":
                 extra = ("ждёт ответа" + (f": {extra}" if extra else ""))
@@ -149,8 +154,14 @@ def collect_items(notes: list[VaultNote], today: date) -> list[Item]:
             if found and (found[0] - today).days <= 14:
                 age = f", исполнится {found[1]}" if found[1] else ""
                 items.append(Item(found[0], "день рождения", note.title, age.lstrip(", ")))
-    items.sort(key=lambda item: (item.day, item.label, item.title))
-    return items
+    unique, seen = [], set()
+    for item in items:                                # дубли карточек и заметок одного человека, одинаковые строки
+        key = (item.day, item.label, item.title)
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    unique.sort(key=lambda item: (item.day, item.label, item.title))
+    return unique
 
 
 def _line(item: Item, today: date) -> str:
