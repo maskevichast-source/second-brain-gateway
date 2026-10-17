@@ -167,6 +167,26 @@ class Database:
             conn.commit()
         return added
 
+    def requeue_recent(self, hours: float) -> int:
+        """Возвращает в очередь заметки из последних `hours` часов (ответы хранятся 24 часа), которые уже забрали и стёрли.
+        Уже лежащие в очереди не дублируются (уникальна пара capture_id + имя файла)."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=min(max(hours, 0.1), 24))).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT capture_id, revision, response_json FROM responses WHERE created_at >= ? ORDER BY created_at",
+                (cutoff,)).fetchall()
+        added = 0
+        for row in rows:
+            try:
+                response = json.loads(row["response_json"])
+            except ValueError:
+                continue
+            files = response.get("files") if isinstance(response, dict) else None
+            if not files or (response.get("needs_review") and row["revision"] == 1):
+                continue                      # служебные ответы Telegram и черновики с вопросом не трогаем
+            added += self.enqueue(row["capture_id"], files)
+        return added
+
     def enqueue_files(self, capture_id: str, planned: list[dict]) -> int:
         """Исходники: в очереди только квитанция (id файла в Telegram), сами байты сервер не хранит."""
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")

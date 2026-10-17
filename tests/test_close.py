@@ -118,3 +118,18 @@ def test_ack_accepts_single_id_number_or_text(tg):
         assert client.post("/ack", json={"ids": value}, headers=auth()).status_code == 200
     assert client.post("/ack", json={"id": 5}, headers=auth()).status_code == 200
     assert client.post("/ack", json={"ids": "abc"}, headers=auth()).status_code == 422
+
+
+def test_requeue_returns_acked_notes_but_does_not_duplicate_queued_ones(tmp_path):
+    from app.db import Database
+    db = Database(tmp_path / "t.db")
+    db.init()
+    file = {"filename": "2026-10-17-test.md", "folder": "0-Inbox", "markdown": "---\ntype: note\n---\nтекст", "reminders": []}
+    db.save(capture_id="tgi-1-1", revision=1, response={"files": [file], "needs_review": False})
+    db.save(capture_id="tgi-2-1", revision=1, response={"files": [dict(file, filename="x.md")], "needs_review": True})
+    db.save(capture_id="reply-3", revision=1, response={"method": "sendMessage"})
+    assert db.requeue_recent(6) == 1 and db.requeue_recent(6) == 0
+    items = db.pending(10)
+    assert [i["filename"] for i in items] == ["2026-10-17-test.md"]
+    db.ack([items[0]["id"]])
+    assert db.requeue_recent(6) == 1
