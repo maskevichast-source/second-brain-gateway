@@ -37,15 +37,29 @@ async def transcribe(settings: Settings, file_id: str, http_client: httpx.AsyncC
         audio.raise_for_status()
         if len(audio.content) > MAX_BYTES:
             return None
+
+        # Telegram отдаёт voice/file_X.oga, но Groq требует расширение .ogg
+        filename = path.rsplit("/", 1)[-1] or "voice.ogg"
+        if filename.endswith(".oga"):
+            filename = filename[:-4] + ".ogg"
+
         response = await client.post(
             f"{settings.stt_base_url}/audio/transcriptions",
             headers={"Authorization": f"Bearer {settings.stt_api_key}"},
-            files={"file": (path.rsplit("/", 1)[-1] or "voice.ogg", audio.content)},
+            files={"file": (filename, audio.content, "audio/ogg")},
             data={"model": settings.stt_model, "language": "ru", "response_format": "json"},
         )
         response.raise_for_status()
         text = str(response.json().get("text", "")).strip()
         return text or None
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "stt: ошибка API %s: %s",
+            exc.response.status_code,
+            exc.response.text[:300]
+        )
+        monitor.failure("stt", exc)
+        return None
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         logger.warning("stt: не удалось расшифровать (%s)", type(exc).__name__)
         monitor.failure("stt", exc)
