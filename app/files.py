@@ -2,7 +2,7 @@
 
 Файлы нигде не сохраняются: байты живут только во время обработки сообщения. PDF читается локально
 библиотекой pypdf (без сети). Распознавание картинок через vision-модель выключено, пока не задана
-переменная VISION_MODEL; без неё или при любом сбое запись сохраняется как есть с честной пометкой.
+переменная VISION_MODEL (и ключ: VISION_API_KEY или общий STT_API_KEY); без неё или при любом сбое запись сохраняется как есть с честной пометкой.
 """
 from __future__ import annotations
 
@@ -79,8 +79,16 @@ def extract_pdf_text(data: bytes, max_pages: int = MAX_PDF_PAGES) -> str:
     return text.strip()
 
 
+def _vision_key(settings: Settings) -> str:
+    return settings.vision_api_key or settings.stt_api_key
+
+
+def _vision_base(settings: Settings) -> str:
+    return settings.vision_base_url or settings.stt_base_url
+
+
 def vision_enabled(settings: Settings) -> bool:
-    return bool(settings.vision_model and settings.stt_api_key)
+    return bool(settings.vision_model and _vision_key(settings))
 
 
 async def describe_image(settings: Settings, data: bytes, mime: str = "image/jpeg",
@@ -92,13 +100,19 @@ async def describe_image(settings: Settings, data: bytes, mime: str = "image/jpe
     client = http_client or httpx.AsyncClient(timeout=60)
     try:
         url = f"data:{mime or 'image/jpeg'};base64,{base64.b64encode(data).decode('ascii')}"
+        base = _vision_base(settings)
+        body = {"model": settings.vision_model, "temperature": 0, "max_tokens": 1500,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "image_url", "image_url": {"url": url}}]}]}
+        if "generativelanguage.googleapis.com" in base:
+            # Gemini «думает» перед ответом и тратит на это лимит токенов: думаем минимально, лимит побольше
+            body["reasoning_effort"] = "low"
+            body["max_tokens"] = 4000
         response = await client.post(
-            f"{settings.stt_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.stt_api_key}"},
-            json={"model": settings.vision_model, "temperature": 0, "max_tokens": 1500,
-                  "messages": [{"role": "user", "content": [
-                      {"type": "text", "text": VISION_PROMPT},
-                      {"type": "image_url", "image_url": {"url": url}}]}]},
+            f"{base}/chat/completions",
+            headers={"Authorization": f"Bearer {_vision_key(settings)}"},
+            json=body,
         )
         response.raise_for_status()
         text = str(response.json()["choices"][0]["message"]["content"] or "").strip()

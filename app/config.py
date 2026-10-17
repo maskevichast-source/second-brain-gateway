@@ -43,6 +43,8 @@ class Settings:
     stt_base_url: str = "https://api.groq.com/openai/v1"
     stt_model: str = "whisper-large-v3-turbo"
     vision_model: str = ""          # пусто: распознавание текста на картинках выключено
+    vision_api_key: str = field(default="", repr=False)   # пусто: берётся STT_API_KEY (Groq)
+    vision_base_url: str = ""                              # пусто: берётся STT_BASE_URL; для Gemini см. README
 
 
 def load_settings() -> Settings:
@@ -92,4 +94,6 @@ def load_settings() -> Settings:
         stt_base_url=os.environ.get("STT_BASE_URL", "https://api.groq.com/openai/v1").strip().rstrip("/"),
         stt_model=os.environ.get("STT_MODEL", "whisper-large-v3-turbo").strip(),
         vision_model=os.environ.get("VISION_MODEL", "").strip(),
+        vision_api_key=os.environ.get("VISION_API_KEY", "").strip(),
+        vision_base_url=os.environ.get("VISION_BASE_URL", "").strip().rstrip("/"),
     )

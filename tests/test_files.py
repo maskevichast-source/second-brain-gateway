@@ -158,6 +158,22 @@ def test_describe_image_uses_openai_compatible_call_and_falls_back(tmp_path):
         return httpx.Response(500)
 
     assert asyncio.run(files.describe_image(settings, b"x", "image/png", httpx.AsyncClient(transport=httpx.MockTransport(down)))) is None
+    # отдельный провайдер для картинок (Gemini): свой ключ и адрес, голос остаётся на Groq
+    seen2 = {}
+
+    def gem(request):
+        seen2["url"], seen2["auth"], seen2["body"] = str(request.url), request.headers["authorization"], json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Чек: 1200"}}]})
+
+    g = make_settings(tmp_path, stt_api_key="groq", vision_model="gemini-flash-latest", vision_api_key="gkey",
+                      vision_base_url="https://generativelanguage.googleapis.com/v1beta/openai")
+    assert files.vision_enabled(g)
+    assert asyncio.run(files.describe_image(g, b"x", "image/png", httpx.AsyncClient(transport=httpx.MockTransport(gem)))) == "Чек: 1200"
+    assert seen2["url"] == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    assert seen2["auth"] == "Bearer gkey" and seen2["body"]["reasoning_effort"] == "low" and seen2["body"]["max_tokens"] == 4000
+    assert "reasoning_effort" not in seen["body"]                          # Groq этот параметр не получает
+    only_vision_key = make_settings(tmp_path, vision_model="m", vision_api_key="k")      # STT_API_KEY не нужен
+    assert files.vision_enabled(only_vision_key)
     off = make_settings(tmp_path, stt_api_key="k")                            # VISION_MODEL не задан: выключено
     assert asyncio.run(files.describe_image(off, b"x")) is None and not files.vision_enabled(off)
 
