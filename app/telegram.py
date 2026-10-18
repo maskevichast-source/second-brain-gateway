@@ -41,6 +41,7 @@ HELP = (
     "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
     "• /fact текст — короткий факт для меня, например «Собаку зовут Янка» (имена, клички, места): учту в записях и в расшифровке голосовых.\n"
     "• /requeue 6 — если заметки забрали, но они не сохранились: верну в очередь заметки за последние 6 часов (не дольше 24).\n"
+    "• /import дом — перенесу из «Ады» список «Дом»: техника, растения, фильтры и когда за ними ухаживать.\n"
     "• /people — кого я знаю. /status — очередь, срез, сбои. /sync — состояние среза, /forget — стереть срез, /backup — файл с копией профиля и среза.\n\n"
     "Голосовые сообщения расшифровываю (если подключён сервис речи, README часть 10). PDF с текстом читаю и записываю как обычную запись. "
     "Фото и сканы сохраняю с подписью; текст с картинки распознаю, только если включено (VISION_MODEL), иначе честно скажу, что не распознан."
@@ -288,7 +289,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     if command == "/push":
         return _reply(chat_id, _push_command(text, db, settings))
     command = {"/кто": "/who", "/радар": "/radar", "/обещания": "/promises", "/долги": "/promises",
-               "/дела": "/tasks", "/отмена": "/cancel", "/отложи": "/snooze"}.get(command, command)
+               "/дела": "/tasks", "/отмена": "/cancel", "/отложи": "/snooze", "/импорт": "/import"}.get(command, command)
     words = text.split()
     if command in ("/done", "/cancel", "/snooze") and len(words) > 1:           # «/done 2», «/cancel купить молоко»
         diary_state = db.get_state(chat_id)
@@ -303,7 +304,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             current = db.get_state(chat_id)
             if current and current[0] in ("interview", "person", "diary"):
                 command, text = "/stop", "/stop"
-    if command in ("/ask", "/day", "/tasks", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
+    if command in ("/ask", "/day", "/tasks", "/import", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
             return _reply(chat_id, "Эта команда пока недоступна.")

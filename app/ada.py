@@ -140,3 +140,31 @@ async def fetch_summary(settings: Settings, http_client: httpx.AsyncClient | Non
 
 def clear_cache() -> None:
     _cache.clear()
+
+
+def homecare_url(settings: Settings) -> str:
+    """Адрес списка «Дом» рядом с адресом сводки: .../api/secretary -> .../api/homecare."""
+    url = settings.ada_summary_url.rstrip("/")
+    return (url[: -len("secretary")] + "homecare") if url.endswith("/secretary") else ""
+
+
+async def fetch_homecare(settings: Settings, http_client: httpx.AsyncClient | None = None) -> list[dict] | None:
+    """Список «Дом» из «Ады» или None, если «Ада» не настроена или недоступна."""
+    url = homecare_url(settings)
+    if not configured(settings) or not url:
+        return None
+    owns = http_client is None
+    client = http_client or httpx.AsyncClient(timeout=settings.ada_timeout)
+    try:
+        response = await client.get(url, headers={"X-Secretary-Token": settings.ada_summary_token},
+                                    timeout=settings.ada_timeout)
+        response.raise_for_status()
+        items = response.json().get("items")
+    except (httpx.HTTPError, ValueError, AttributeError) as exc:
+        logger.warning("ADA: список «Дом» недоступен (%s)", type(exc).__name__)
+        monitor.failure("ada", exc)
+        return None
+    finally:
+        if owns:
+            await client.aclose()
+    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else None

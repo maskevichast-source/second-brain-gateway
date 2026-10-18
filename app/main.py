@@ -34,6 +34,7 @@ from . import llm as llm_module
 from .config import Settings, load_settings
 from .db import Database
 from . import actions as actions_module
+from . import ada_home as ada_home_module
 from .telegram import flush_stale_waiting, handle_update
 from .service import build_private_response, build_response
 from .textutil import find_urls, is_valid_capture_id, split_private
@@ -478,6 +479,11 @@ def create_app(
         if error:
             return error
         now = clock()
+        if kind == "import":
+            word = arg.strip().lower()
+            if not word.startswith("дом"):
+                return "Пока умею перенести список «Дом» из «Ады»: /import дом (ещё раз целиком: /import дом заново)."
+            return await ada_home_module.import_home(settings, db, now, force="заново" in word or "все" in word)
         ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
         result = await ask_module.answer_question(
             settings, notes, payload.question, now,
