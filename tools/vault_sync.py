@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -201,18 +202,64 @@ def close_note(vault: Path, payload: dict) -> str:
     return "closed"
 
 
+SETTABLE = {"status", "due", "remind_at", "next_due", "event_at", "deadline"}
+
+
+def update_note(vault: Path, payload: dict) -> str:
+    """Меняет свойства дела (перенос срока). Возвращает: updated | not_found | ambiguous | invalid."""
+    title = str(payload.get("title") or "").strip()
+    fields = payload.get("fields")
+    if not title or not isinstance(fields, dict) or not fields or not set(fields) <= SETTABLE:
+        return "invalid"
+    if not all(isinstance(v, str) and v and "\n" not in v for v in fields.values()):
+        return "invalid"
+    candidates = find_notes(vault, title, str(payload.get("created") or ""))
+    if not candidates:
+        return "not_found"
+    if len(candidates) > 1:
+        return "ambiguous"
+    path = candidates[0]
+    try:
+        text = _read_text(path)
+        parsed = _front_lines(text)
+        if not parsed:
+            return "not_found"
+        lines, end = parsed
+        newline = "\r\n" if lines[end].endswith("\r\n") else "\n"
+        for key, value in fields.items():
+            index, _current = _front_value(lines, end, key)
+            plain = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?", value))
+            row = f"{key}: " + (value if plain else json.dumps(value, ensure_ascii=False)) + newline
+            if index is None:
+                lines.insert(end, row)
+                end += 1
+            else:
+                lines[index] = row
+        tmp = path.with_name(path.name + ".tmp-sync")
+        with open(tmp, "w", encoding="utf-8", newline="") as handle:
+            handle.write("".join(lines))
+        os.replace(tmp, path)
+    except (OSError, UnicodeDecodeError):
+        return "invalid"
+    return "updated"
+
+
 def apply_service(vault: Path, item: dict) -> str:
     """Служебная запись из очереди. Неизвестные виды пропускаются (подтверждаются), чтобы очередь не стояла."""
     try:
         payload = json.loads(item.get("markdown") or "{}")
     except ValueError:
         return "invalid"
-    if not isinstance(payload, dict) or payload.get("action") != "close":
+    if not isinstance(payload, dict):
+        return "invalid"
+    if payload.get("action") == "set":
+        return update_note(vault, payload)
+    if payload.get("action") != "close":
         return "invalid"
     return close_note(vault, payload)
 
 
-SERVICE_RU = {"closed": "дело закрыто", "already": "уже закрыто, пропускаю", "not_found": "заметка не найдена, пропускаю",
+SERVICE_RU = {"closed": "дело закрыто", "updated": "срок перенесён", "already": "уже закрыто, пропускаю", "not_found": "заметка не найдена, пропускаю",
               "ambiguous": "подходит несколько заметок, пропускаю", "invalid": "непонятная запись, пропускаю"}
 
 

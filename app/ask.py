@@ -70,6 +70,30 @@ class Item:
     label: str
     title: str
     extra: str = ""
+    key: str = ""        # короткий ключ заметки: по нему кнопки и «сделано 1» находят дело
+    field: str = ""      # какое свойство заметки дало эту строку (due, remind_at, ...)
+
+
+MAX_NUMBERED = 12
+# что можно закрыть, отменить или отложить из сводки: (тип заметки, свойство со сроком) -> статус «сделано»
+ACTIONABLE = {("task", "due"): "сделано", ("task", "remind_at"): "сделано", ("event", "event_at"): "состоялось",
+              ("home", "next_due"): "сделано", ("project", "deadline"): "сделано", ("case", "deadline"): "сделано"}
+
+
+def _base_name(title: Any) -> str:
+    """«Владислав Маскевич — профиль» и «Владислав Маскевич (дубль)» — один и тот же человек."""
+    head = re.split(r"\s+[—–-]\s+|\s*\(", str(title or ""))[0]
+    return re.sub(r"\s+", " ", head).strip().lower().replace("ё", "е")
+
+
+def _owner_names(notes: list[VaultNote]) -> set[str]:
+    """Свою карточку узнаём по «— профиль» или по отношению «я»: свой день рождения в сводке не нужен."""
+    names = set()
+    for n in notes:
+        if n.type == "person" and ("профиль" in n.title.lower()
+                                   or str(n.get("relation") or "").strip().lower() in ("я", "себя", "владелец", "owner", "self")):
+            names.add(_base_name(n.title))
+    return names
 
 
 def _next_birthday(value: Any, today: date) -> tuple[date, int | None] | None:
@@ -122,6 +146,7 @@ def roll_forward(day: date, period: int, today: date) -> date:
 
 def collect_items(notes: list[VaultNote], today: date) -> list[Item]:
     items: list[Item] = []
+    owners = _owner_names(notes)
     for note in notes:
         status = str(note.get("status"))
         task_days: set[date] = set()                 # срок и напоминание на один день: показываем один раз
@@ -148,15 +173,16 @@ def collect_items(notes: list[VaultNote], today: date) -> list[Item]:
             extra = ", ".join(note.people[:3])
             if rule.type == "task" and rule.field == "due" and status == "ждёт":
                 extra = ("ждёт ответа" + (f": {extra}" if extra else ""))
-            items.append(Item(day, rule.label, note.title, extra))
-        if note.type == "person" and note.get("birthday"):
+            items.append(Item(day, rule.label, note.title, extra, key=str(note.front.get("_key") or "") if (note.type, rule.field) in ACTIONABLE else "",
+                              field=rule.field))
+        if note.type == "person" and note.get("birthday") and _base_name(note.title) not in owners:
             found = _next_birthday(note.get("birthday"), today)
             if found and (found[0] - today).days <= 14:
                 age = f", исполнится {found[1]}" if found[1] else ""
                 items.append(Item(found[0], "день рождения", note.title, age.lstrip(", ")))
     unique, seen = [], set()
     for item in items:                                # дубли карточек и заметок одного человека, одинаковые строки
-        key = (item.day, item.label, item.title)
+        key = (item.day, item.label, _base_name(item.title) if item.label == "день рождения" else item.title)
         if key not in seen:
             seen.add(key)
             unique.append(item)
@@ -164,17 +190,31 @@ def collect_items(notes: list[VaultNote], today: date) -> list[Item]:
     return unique
 
 
-def _line(item: Item, today: date) -> str:
+def _line(item: Item, today: date, number: int | None = None) -> str:
     extra = f" ({item.extra})" if item.extra else ""
     when = fmt_date(item.day)
     if item.day < today:
         when += f", просрочено на {(today - item.day).days} дн."
-    return f"• {when}: {item.title}{extra} [{item.label}]"
+    if number is None:
+        return f"• {when}: {item.title}{extra} [{item.label}]"
+    tag = "" if item.label == "дело" else f" [{item.label}]"
+    return f"{number}. {when}: {item.title}{extra}{tag}"
 
 
-def build_digest(notes: list[VaultNote], now: datetime, ada_brief: str = "") -> str:
+def _numbered(items: list[Item], today: date) -> list[tuple[int, Item]]:
+    keyed = [i for i in items if i.key and i.day <= today + timedelta(days=7)]
+    return list(enumerate(keyed[:MAX_NUMBERED], start=1))
+
+
+def digest_actions(notes: list[VaultNote], today: date) -> list[tuple[int, Item]]:
+    """Дела сводки, с которыми можно что-то сделать (номер, строка). Дни рождения и прочее без ключа не нумеруются."""
+    return _numbered(collect_items(notes, today), today)
+
+
+def build_digest(notes: list[VaultNote], now: datetime, ada_brief: str = "", numbered: bool = False) -> str:
     today = now.date()
     items = collect_items(notes, today)
+    numbers = {id(item): n for n, item in _numbered(items, today)} if numbered else {}
     sections = (
         ("Просрочено", [i for i in items if i.day < today]),
         ("Сегодня", [i for i in items if i.day == today]),
@@ -184,9 +224,11 @@ def build_digest(notes: list[VaultNote], now: datetime, ada_brief: str = "") -> 
     out = [f"Сводка на {fmt_date(today)}"]
     for title, rows in sections:
         if rows:
-            out += ["", f"{title}:"] + [_line(i, today) for i in rows]
+            out += ["", f"{title}:"] + [_line(i, today, numbers.get(id(i))) for i in rows]
     if len(out) == 1:
         out += ["", "Срочного нет."]
+    elif numbers:
+        out += ["", "Закрыть: «сделано 1», отменить: «отмена 2», на завтра: «отложи 3». Или кнопки под сообщением."]
 
     waiting = [n for n in notes if n.type == "task" and str(n.get("status")) == "ждёт"
                and not parse_date(n.get("due")) and (parse_date(n.created) or "9999") <= (today - timedelta(days=7)).isoformat()]
@@ -194,11 +236,9 @@ def build_digest(notes: list[VaultNote], now: datetime, ada_brief: str = "") -> 
         out += ["", "Давно жду ответа:"] + [
             f"• {n.title}" + (f" ({', '.join(n.people[:3])})" if n.people else "") for n in waiting[:8]
         ]
-    inbox = [n for n in notes if str(n.get("stage")) == "inbox"]
-    if inbox:
-        weak = [n for n in inbox if _conf(n) < 0.6]
-        tail = f", из них неуверенных {len(weak)}" if weak else ""
-        out += ["", f"Не разобрано во входящих: {len(inbox)}{tail}."]
+    weak = [n for n in notes if str(n.get("stage")) == "inbox" and _conf(n) < 0.6]
+    if weak:
+        out += ["", f"Неуверенно разобрано: {len(weak)} — проверь во входящих."]
     if ada_brief:
         out += ["", ada_brief]
     return "\n".join(out)

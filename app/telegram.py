@@ -16,6 +16,7 @@ import logging
 import re
 from typing import Awaitable, Callable
 
+from . import actions as actions_module
 from . import diary, interview
 from . import sources as sources_module
 from .config import Settings
@@ -59,8 +60,27 @@ def _wrap(text: str, wrapper) -> str:
     return "! " + wrapper(stripped) if private else wrapper(text)
 
 
-def _reply(chat_id: int, text: str) -> dict:
-    return {"method": "sendMessage", "chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True}
+def _reply(chat_id: int, text: str, buttons: list | None = None) -> dict:
+    reply = {"method": "sendMessage", "chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True}
+    if buttons:
+        reply["reply_markup"] = {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
+    return reply
+
+
+def _task_action(chat_id: int, action: str, rest: str, db: Database, now) -> dict | None:
+    """«сделано 1 и 3», «отмена купить молоко», «отложи 2». None: это не про дела, сообщение идёт как обычная запись."""
+    picked, problem = actions_module.resolve(db, rest, now)
+    if problem:
+        return _reply(chat_id, problem)
+    if not picked:
+        return None
+    lines = []
+    for key, title in picked:
+        code, name = actions_module.apply(db, key, action, now)
+        name = name or title
+        lines.append({"ok": f"{actions_module.TOAST[action]}: {name}", "already": f"Уже закрыто: {name}",
+                      "unsupported": f"Для «{name}» это не поддерживается", "missing": f"Не нашёл дело «{title}» (срез обновился)"}[code])
+    return _reply(chat_id, "\n".join(lines) + "\n\nВ хранилище изменение попадёт, когда ноутбук заберёт очередь. Обновить список: /tasks")
 
 
 def _summary(response: dict) -> str:
@@ -221,7 +241,14 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return _reply(chat_id, HELP)
     if command == "/push":
         return _reply(chat_id, _push_command(text, db, settings))
-    command = {"/кто": "/who", "/радар": "/radar", "/обещания": "/promises", "/долги": "/promises"}.get(command, command)
+    command = {"/кто": "/who", "/радар": "/radar", "/обещания": "/promises", "/долги": "/promises",
+               "/дела": "/tasks", "/отмена": "/cancel", "/отложи": "/snooze"}.get(command, command)
+    words = text.split()
+    if command in ("/done", "/cancel", "/snooze") and len(words) > 1:           # «/done 2», «/cancel купить молоко»
+        diary_state = db.get_state(chat_id)
+        if not (command == "/done" and diary_state and diary_state[0] == "diary"):
+            done = _task_action(chat_id, command[1:], " ".join(words[1:]), db, now)
+            return done or _reply(chat_id, "Не нашёл такое дело. Список: /tasks")
     if not command and len(text) <= 80:               # живая речь вместо команд: «давай дальше интервью», «стоп»
         low = text.lower()
         if "интервью" in low and re.search(r"продолж|дальше|давай|начн|запуст|вернись|вернём|вернемся|вернёмся", low):
@@ -230,7 +257,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             current = db.get_state(chat_id)
             if current and current[0] in ("interview", "person", "diary"):
                 command, text = "/stop", "/stop"
-    if command in ("/ask", "/day", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
+    if command in ("/ask", "/day", "/tasks", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
             return _reply(chat_id, "Эта команда пока недоступна.")
@@ -242,8 +269,9 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             return _reply(chat_id, "Напиши вопрос после команды, например: /ask что я обещал Серику?")
         if command in ("/brief", "/who") and not arg:
             return _reply(chat_id, "О ком? Например: /who Серик")
-        return _reply(chat_id, await secretary(command[1:], arg[:1000]))
-    if command == "/done":
+        result = await secretary(command[1:], arg[:1000])
+        return _reply(chat_id, *result) if isinstance(result, tuple) else _reply(chat_id, result)
+    if command == "/done" and len(words) == 1:
         current = db.get_state(chat_id)
         if current and current[0] in ("interview", "person"):
             command, text = "/stop", "/stop"
@@ -297,6 +325,12 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     state = db.get_state(chat_id)
     if state and state[0] == "interview" and state[1].get("paused"):
         state = None                          # интервью на паузе: сообщения обрабатываются как обычные записи
+    if command == "" and not state:                       # «сделано 1», «отмена купить молоко»: управление делами словами
+        phrase = actions_module.parse_phrase(text)
+        if phrase:
+            handled = _task_action(chat_id, phrase[0], phrase[1], db, now)
+            if handled:
+                return handled
     if state and state[0] == "diary" and command in ("", "/skip", "/done"):
         return await _diary_step(chat_id, update_id, text, command, state[1], settings, db, process, now)
     # Ответ на вопрос про нового человека или интервью. Длинное сообщение или ссылка считаются новой записью.
@@ -815,6 +849,12 @@ def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict |
         toast = "Ок, больше не напомню"
         if _close_in_vault(db, key):
             toast = "Готово, больше не напомню. Отмечу сделанным в хранилище при выгрузке"
+    elif action in ("dn", "cx", "sz"):
+        kind = {"dn": "done", "cx": "cancel", "sz": "snooze"}[action]
+        code, title = actions_module.apply(db, key, kind, now)
+        toast = {"ok": f"{actions_module.TOAST[kind]}: {title[:50]}", "already": f"Уже закрыто: {title[:50]}",
+                 "missing": "Не нашёл дело: срез обновился. Открой /tasks",
+                 "unsupported": "Для этого дела не поддерживается"}[code]
     elif action == "snz1":
         db.set_setting(f"rem_{key}", (now + timedelta(hours=1)).replace(tzinfo=None, microsecond=0).isoformat(timespec="minutes"))
         toast = "Напомню через час"

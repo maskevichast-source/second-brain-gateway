@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 
 import httpx
 
+from . import actions as actions_module
 from . import ada as ada_module
 from . import ask as ask_module
 from . import diary
@@ -128,14 +129,14 @@ async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
     if cfg["morning_on"] and notes and now.hour < 12 and db.get_setting("push_morning_last", "") != today.isoformat():
         hh, mm = (int(x) for x in cfg["morning_time"].split(":"))
         if (now.hour, now.minute) >= (hh, mm):
-            text = ask_module.build_digest(notes, now)
+            text, digest_buttons = actions_module.render_day(db, now)
             back = review_module.format_resurface(review_module.pick_resurface(notes, today), today)
             if "Срочного нет" in text and not back:
                 db.set_setting("push_morning_last", today.isoformat())
             else:
                 if back:
                     text += "\n\n" + back
-                if await broadcast("☀️ Доброе утро.\n\n" + text):
+                if await broadcast("☀️ Доброе утро.\n\n" + text, digest_buttons or None):
                     db.set_setting("push_morning_last", today.isoformat())
                 sent += len(chats)
 

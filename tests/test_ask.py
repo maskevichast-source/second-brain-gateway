@@ -64,7 +64,7 @@ def test_digest_decisions_birthdays_and_inbox():
     assert "12 октября (пн): Аля [день рождения]" in text
     assert "Далеко" not in text
     assert "Давно жду ответа:\n• Ждём ответ" in text
-    assert "Не разобрано во входящих: 1, из них неуверенных 1." in text
+    assert "Неуверенно разобрано: 1" in text and "Не разобрано во входящих" not in text
 
 
 def test_digest_feb_29_birthday_does_not_crash():

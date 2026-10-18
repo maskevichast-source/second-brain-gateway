@@ -33,6 +33,7 @@ from . import people as people_module
 from . import llm as llm_module
 from .config import Settings, load_settings
 from .db import Database
+from . import actions as actions_module
 from .telegram import flush_stale_waiting, handle_update
 from .service import build_private_response, build_response
 from .textutil import find_urls, is_valid_capture_id, split_private
@@ -563,8 +564,8 @@ def create_app(
         if not notes:
             return ("Срез хранилища пуст. Запиши что-нибудь через бота или запусти на iPhone шорткат "
                     "«Синхронизировать» (README, часть 8).")
-        if kind == "day":
-            return ask_module.build_digest(notes, now, ada_brief=ada_text)
+        if kind in ("day", "tasks"):
+            return actions_module.render_day(db, now, ada_brief="" if kind == "tasks" else ada_text)
         if kind == "week":
             return review_module.build_week_review(notes, now, ada_text)
         if kind == "health":

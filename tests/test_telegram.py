@@ -606,3 +606,24 @@ def test_stale_questions_stop_swallowing_messages(tmp_path):
         conn.execute("UPDATE tg_state SET kind = 'diary', created_at = ?", (old,))
     assert db.get_state(1) is None
     assert db.interview_progress()["i"] == 4
+
+
+def test_tasks_command_buttons_and_words_end_to_end(tg):
+    corpus = ('---\ntitle: "Заехать к отцу"\ntype: task\nstatus: "открыто"\ndue: 2026-10-10\ncreated: 2026-10-01T10:00\n---\n'
+              "\n=====NOTE=====\n"
+              '---\ntitle: "Купить кабель"\ntype: task\nstatus: "открыто"\ndue: 2026-10-12\ncreated: 2026-10-02T10:00\n---\n')
+    client = tg()
+    assert client.post("/snapshot", json={"corpus": corpus}, headers=auth()).status_code == 200
+    reply = send(client, update("/tasks", uid=1)).json()
+    assert "1. " in reply["text"] and "Заехать к отцу" in reply["text"]
+    data = [b["callback_data"] for row in reply["reply_markup"]["inline_keyboard"] for b in row]
+    assert any(d.startswith("dn:") for d in data) and any(d.startswith("cx:") for d in data) and any(d.startswith("sz:") for d in data)
+    done = send(client, update("сделано 1", uid=2)).json()["text"]
+    assert "Готово: Заехать к отцу" in done
+    after = send(client, update("/tasks", uid=3)).json()["text"]
+    assert "Заехать к отцу" not in after and "Купить кабель" in after
+    button = {"update_id": 4, "callback_query": {"id": "9", "from": {"id": ME}, "data": [d for d in data if d.startswith("cx:")][1]}}
+    assert "Отменено" in send(client, button).json()["text"]
+    assert "Купить кабель" not in send(client, update("/tasks", uid=5)).json()["text"]
+    service = client.get("/pending?service=1", headers=auth()).json()["items"]
+    assert len([i for i in service if i.get("kind") == "close"]) == 2
