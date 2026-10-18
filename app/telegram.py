@@ -18,6 +18,7 @@ from typing import Awaitable, Callable
 
 from . import actions as actions_module
 from . import diary, interview
+from . import when as when_module
 from . import sources as sources_module
 from .config import Settings
 from .db import Database
@@ -67,8 +68,50 @@ def _reply(chat_id: int, text: str, buttons: list | None = None) -> dict:
     return reply
 
 
+WHEN_HELP = "Напиши, когда: «через 2 часа», «в 18:30», «завтра утром», «в пятницу», «25 октября»."
+
+
+def _reschedule_reply(db: Database, picked: list, target, now) -> str:
+    when, has_time = target
+    lines = []
+    for key, title in picked:
+        code, name = actions_module.reschedule(db, key, when, has_time, now)
+        name = name or title
+        said = when_module.human(when, has_time, now)
+        lines.append({"ok": f"⏰ Перенёс: {name} — {said}." + (" Напомню в Telegram." if has_time else ""),
+                      "already": f"Уже закрыто: {name}", "unsupported": f"Для «{name}» перенос не поддерживается",
+                      "missing": f"Не нашёл дело «{title}» (срез обновился)"}[code])
+    return "\n".join(lines)
+
+
+def _snooze_action(chat_id: int, rest: str, db: Database, now) -> dict | None:
+    """«отложи 3 на 2 часа» переносит сразу; «отложи 3» показывает варианты, подходящие ко времени суток."""
+    m = None if re.fullmatch(r"[\d\s,;и.]+", rest) else re.match(r"^(\d+(?:[\s,;и]+\d+)*)\s+(\S.*)$", rest)
+    if m:
+        target = when_module.parse_when(m.group(2), now)
+        if not target:
+            return _reply(chat_id, "Не понял, на когда. " + WHEN_HELP)
+        picked, problem = actions_module.resolve(db, m.group(1), now)
+        if problem:
+            return _reply(chat_id, problem)
+        return _reply(chat_id, _reschedule_reply(db, picked, target, now))
+    picked, problem = actions_module.resolve(db, rest, now)
+    if problem:
+        return _reply(chat_id, problem)
+    if not picked:
+        return None
+    if len(picked) > 1:
+        return _reply(chat_id, "Выбери одно дело, например: отложи 3. Или сразу с временем: отложи 1 и 3 на завтра.")
+    shown = actions_module.panel(db, picked[0][0], now)
+    if not shown:
+        return _reply(chat_id, f"Не нашёл дело «{picked[0][1]}» (срез обновился)")
+    return _reply(chat_id, *shown)
+
+
 def _task_action(chat_id: int, action: str, rest: str, db: Database, now) -> dict | None:
     """«сделано 1 и 3», «отмена купить молоко», «отложи 2». None: это не про дела, сообщение идёт как обычная запись."""
+    if action == "snooze":
+        return _snooze_action(chat_id, rest, db, now)
     picked, problem = actions_module.resolve(db, rest, now)
     if problem:
         return _reply(chat_id, problem)
@@ -119,7 +162,10 @@ async def handle_update(
     """Возвращает ответ для Telegram (метод sendMessage) или None, если отвечать не нужно."""
     callback = update.get("callback_query")
     if isinstance(callback, dict):
-        return _callback(callback, settings, db, clock)
+        reply = _callback(callback, settings, db, clock)
+        if reply and reply.get("method") != "answerCallbackQuery":
+            await _ack_callback(settings, callback)
+        return reply
     message = update.get("message")
     if not isinstance(message, dict):
         return None
@@ -325,6 +371,20 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     state = db.get_state(chat_id)
     if state and state[0] == "interview" and state[1].get("paused"):
         state = None                          # интервью на паузе: сообщения обрабатываются как обычные записи
+    if state and state[0] == "resched":                    # бот спросил «на когда перенести?»
+        if command == "/skip":
+            db.clear_state(chat_id)
+            return _reply(chat_id, "Ок, не переношу.")
+        if command == "":
+            target = when_module.parse_when(text, now)
+            if target:
+                db.clear_state(chat_id)
+                return _reply(chat_id, _reschedule_reply(db, [(state[1]["key"], state[1].get("title", ""))], target, now))
+            if len(text) > 60 or _TASKISH.match(text):
+                db.clear_state(chat_id)                    # это уже новая запись, а не ответ про время
+                state = None
+            else:
+                return _reply(chat_id, "Не понял, на когда. " + WHEN_HELP + " Или /skip.")
     if command == "" and not state:                       # «сделано 1», «отмена купить молоко»: управление делами словами
         phrase = actions_module.parse_phrase(text)
         if phrase:
@@ -840,28 +900,85 @@ def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict |
     if user_id not in settings.telegram_allowed_ids:
         return None
     data = str(callback.get("data") or "")
-    action, _, key = data.partition(":")
+    action, _, rest = data.partition(":")
+    key, _, extra = rest.partition(":")
     now = clock() if clock else _now(settings)
+    message = callback.get("message") or {}
+    chat_id, message_id = (message.get("chat") or {}).get("id") or user_id, message.get("message_id")
+
+    def toast(text: str) -> dict:
+        return {"method": "answerCallbackQuery", "callback_query_id": callback.get("id", ""), "text": text}
+
+    def edit(text: str, buttons: list | None = None) -> dict:
+        """Сообщение со сводкой меняется на месте: чат не засоряется. Без message_id остаётся короткая подсказка."""
+        if not message_id:
+            return toast(text.split("\n")[0][:190])
+        reply = {"method": "editMessageText", "chat_id": chat_id, "message_id": message_id,
+                 "text": text[:4000], "disable_web_page_preview": True}
+        if buttons:
+            reply["reply_markup"] = {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
+        return reply
+
+    def back_to_list(line: str) -> dict:
+        listing, buttons = actions_module.render_day(db, now)
+        return edit(f"{line}\n\n{listing}", buttons)
+
     if not re.fullmatch(r"[0-9a-f]{12}", key):
-        toast = "Не понял кнопку"
-    elif action == "ok":
+        return toast("Не понял кнопку")
+    if action == "ok":
         db.set_setting(f"rem_{key}", "done")
-        toast = "Ок, больше не напомню"
+        text = "Ок, больше не напомню"
         if _close_in_vault(db, key):
-            toast = "Готово, больше не напомню. Отмечу сделанным в хранилище при выгрузке"
-    elif action in ("dn", "cx", "sz"):
+            text = "Готово, больше не напомню. Отмечу сделанным в хранилище при выгрузке"
+        return toast(text)
+    if action == "bk":
+        listing, buttons = actions_module.render_day(db, now)
+        return edit(listing, buttons)
+    if action == "it":
+        shown = actions_module.panel(db, key, now)
+        return edit(*shown) if shown else toast("Не нашёл дело: срез обновился. Открой /tasks")
+    if action == "sx":
+        found = actions_module.panel(db, key, now)
+        title = found[0].split("\n")[0] if found else ""
+        if not found:
+            return toast("Не нашёл дело: срез обновился. Открой /tasks")
+        db.set_state(chat_id, "resched", {"key": key, "title": title})
+        return _reply(chat_id, f"На когда перенести «{title}»? {WHEN_HELP} Или /skip.")
+    if action == "sn":
+        target = when_module.snooze_time(extra, now)
+        if not target:
+            return toast("Не понял кнопку")
+        code, title = actions_module.reschedule(db, key, target[0], target[1], now)
+        said = when_module.human(target[0], target[1], now)
+        if code == "ok":
+            return back_to_list(f"⏰ {title}: {said}" + (". Напомню в Telegram." if target[1] else "."))
+        return toast("Уже закрыто" if code == "already" else "Не нашёл дело: срез обновился. Открой /tasks")
+    if action in ("dn", "cx", "sz"):
         kind = {"dn": "done", "cx": "cancel", "sz": "snooze"}[action]
         code, title = actions_module.apply(db, key, kind, now)
-        toast = {"ok": f"{actions_module.TOAST[kind]}: {title[:50]}", "already": f"Уже закрыто: {title[:50]}",
-                 "missing": "Не нашёл дело: срез обновился. Открой /tasks",
-                 "unsupported": "Для этого дела не поддерживается"}[code]
-    elif action == "snz1":
+        if code == "ok":
+            return back_to_list(f"{actions_module.TOAST[kind]}: {title[:80]}") if message_id else \
+                toast(f"{actions_module.TOAST[kind]}: {title[:50]}")
+        return toast({"already": f"Уже закрыто: {title[:50]}", "missing": "Не нашёл дело: срез обновился. Открой /tasks",
+                      "unsupported": "Для этого дела не поддерживается"}[code])
+    if action == "snz1":
         db.set_setting(f"rem_{key}", (now + timedelta(hours=1)).replace(tzinfo=None, microsecond=0).isoformat(timespec="minutes"))
-        toast = "Напомню через час"
-    elif action == "snz24":
+        return toast("Напомню через час")
+    if action == "snz24":
         tomorrow = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0, tzinfo=None)
         db.set_setting(f"rem_{key}", tomorrow.isoformat(timespec="minutes"))
-        toast = "Напомню завтра в 9:00"
-    else:
-        toast = "Не понял кнопку"
-    return {"method": "answerCallbackQuery", "callback_query_id": callback.get("id", ""), "text": toast}
+        return toast("Напомню завтра в 9:00")
+    return toast("Не понял кнопку")
+
+
+async def _ack_callback(settings: Settings, callback: dict) -> None:
+    """Убирает «часики» на кнопке: ответ на нажатие уходит отдельным запросом, а само сообщение правится через webhook."""
+    if not settings.telegram_bot_token or not callback.get("id"):
+        return
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.post(f"https://api.telegram.org/bot{settings.telegram_bot_token}/answerCallbackQuery",
+                              json={"callback_query_id": callback["id"]})
+    except httpx.HTTPError:
+        pass

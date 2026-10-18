@@ -67,10 +67,10 @@ def find_reminder_note(items: list[tuple[str, dict]], key: str) -> tuple[str, di
     return None
 
 
-def due_reminders(items: list[tuple[str, dict]], db: Database, now: datetime) -> list[tuple[str, str, str]]:
-    """(ключ, заголовок, подпись) для напоминаний, срок которых наступил и о которых ещё не сообщали."""
+def due_reminders(items: list[tuple[str, dict]], db: Database, now: datetime) -> list[tuple[str, str, str, str]]:
+    """(ключ, заголовок, подпись, ключ заметки в срезе) для напоминаний, срок которых наступил и о которых ещё не сообщали."""
     out = []
-    for _, front in items:
+    for row_key, front in items:
         if str(front.get("status", "")) in DONE_STATES or front.get("type") not in ("task", "event"):
             continue
         field, lead = ("remind_at", timedelta(0)) if front.get("remind_at") else ("event_at", timedelta(minutes=30))
@@ -87,7 +87,7 @@ def due_reminders(items: list[tuple[str, dict]], db: Database, now: datetime) ->
             due = datetime.fromisoformat(state).replace(tzinfo=now.tzinfo)
         if due <= now < due + REMIND_WINDOW:
             label = "⏰ Скоро событие" if field == "event_at" else "⏰ Напоминание"
-            out.append((key, title, f"{label}: {title}"))
+            out.append((key, title, f"{label}: {title}", row_key[:12]))
     return out
 
 
@@ -119,8 +119,9 @@ async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
 
     # напоминания в срок (с кнопками отложить)
     if cfg["rem_on"] and notes:
-        for key, title, text in due_reminders(items, db, now):
-            buttons = [[("Через час", f"snz1:{key}"), ("Завтра утром", f"snz24:{key}")], [("Сделано", f"ok:{key}")]]
+        for key, title, text, note_key in due_reminders(items, db, now):
+            buttons = [[("Через час", f"snz1:{key}"), ("Завтра утром", f"snz24:{key}")],
+                       [("Сделано", f"ok:{key}"), ("⏰ Другое время", f"it:{note_key}")]]
             if await broadcast(text, buttons):
                 db.set_setting(f"rem_{key}", "sent")
             sent += len(chats)

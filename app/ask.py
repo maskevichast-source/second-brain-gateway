@@ -228,7 +228,7 @@ def build_digest(notes: list[VaultNote], now: datetime, ada_brief: str = "", num
     if len(out) == 1:
         out += ["", "Срочного нет."]
     elif numbers:
-        out += ["", "Закрыть: «сделано 1», отменить: «отмена 2», на завтра: «отложи 3». Или кнопки под сообщением."]
+        out += ["", "Нажми номер дела: закрыть, отменить или перенести. Или словами: «сделано 1», «отмена 2», «отложи 3 на 2 часа»."]
 
     waiting = [n for n in notes if n.type == "task" and str(n.get("status")) == "ждёт"
                and not parse_date(n.get("due")) and (parse_date(n.created) or "9999") <= (today - timedelta(days=7)).isoformat()]

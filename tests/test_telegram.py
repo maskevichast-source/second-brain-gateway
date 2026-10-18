@@ -617,12 +617,12 @@ def test_tasks_command_buttons_and_words_end_to_end(tg):
     reply = send(client, update("/tasks", uid=1)).json()
     assert "1. " in reply["text"] and "Заехать к отцу" in reply["text"]
     data = [b["callback_data"] for row in reply["reply_markup"]["inline_keyboard"] for b in row]
-    assert any(d.startswith("dn:") for d in data) and any(d.startswith("cx:") for d in data) and any(d.startswith("sz:") for d in data)
+    assert all(d.startswith("it:") for d in data) and len(data) == 2                # только номера дел
     done = send(client, update("сделано 1", uid=2)).json()["text"]
     assert "Готово: Заехать к отцу" in done
     after = send(client, update("/tasks", uid=3)).json()["text"]
     assert "Заехать к отцу" not in after and "Купить кабель" in after
-    button = {"update_id": 4, "callback_query": {"id": "9", "from": {"id": ME}, "data": [d for d in data if d.startswith("cx:")][1]}}
+    button = {"update_id": 4, "callback_query": {"id": "9", "from": {"id": ME}, "data": "cx:" + data[1][3:]}}
     assert "Отменено" in send(client, button).json()["text"]
     assert "Купить кабель" not in send(client, update("/tasks", uid=5)).json()["text"]
     service = client.get("/pending?service=1", headers=auth()).json()["items"]

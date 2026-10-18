@@ -10,7 +10,7 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from . import ask
+from . import ask, when as when_module
 from .db import Database
 from .snapshot import to_notes
 from .textutil import parse_date
@@ -32,9 +32,34 @@ def render_day(db: Database, now: datetime, ada_brief: str = "") -> tuple[str, l
     acts = ask.digest_actions(notes, now.date())
     db.set_setting("last_list", json.dumps({"at": now.replace(tzinfo=None).isoformat(timespec="minutes"),
                                             "items": [[item.key, item.title] for _, item in acts]}, ensure_ascii=False))
-    buttons = [[(f"✅ {n}", f"dn:{item.key}"), (f"🗑 {n}", f"cx:{item.key}"), (f"⏭ {n}", f"sz:{item.key}")]
-               for n, item in acts]
+    numbers = [(str(n), f"it:{item.key}") for n, item in acts]
+    buttons = [numbers[i:i + 6] for i in range(0, len(numbers), 6)]       # одна-две строки с номерами, а не стена кнопок
     return text, buttons
+
+
+def panel(db: Database, key: str, now: datetime) -> tuple[str, list] | None:
+    """Что можно сделать с одним делом: готово, отмена и переносы, которые подходят ко времени суток."""
+    found = _find(db, key)
+    if not found:
+        return None
+    front = found[1]
+    today = now.date()
+    raw = next((front[f] for f in ("remind_at", "event_at", "due", "next_due", "deadline") if front.get(f)), "")
+    when_text = ""
+    parsed = parse_date(raw)
+    if parsed:
+        day = date.fromisoformat(parsed)
+        when_text = ask.fmt_date(day) + (f", просрочено на {(today - day).days} дн." if day < today else "")
+        if len(str(raw)) > 10:
+            when_text += f", {str(raw)[11:16]}"
+    people = ", ".join(front.get("people") or [])
+    text = "\n".join(x for x in (str(front.get("title", "")), when_text, people, "", "Что сделать?") if x is not None)
+    options = when_module.snooze_options(now)
+    rows = [[("✅ Готово", f"dn:{key}"), ("🗑 Отменить", f"cx:{key}")]]
+    pairs = [(f"⏰ {label}", f"sn:{key}:{code}") for label, code in options]
+    rows += [pairs[i:i + 2] for i in range(0, len(pairs), 2)]
+    rows.append([("🕐 Своё время", f"sx:{key}"), ("← Список", "bk:" + "0" * 12)])
+    return text, rows
 
 
 def _find(db: Database, key: str) -> tuple[str, dict] | None:
@@ -98,6 +123,43 @@ def apply(db: Database, key: str, action: str, now: datetime) -> tuple[str, str]
     status = "отменено" if action == "cancel" else next(v for (t, _), v in ask.ACTIONABLE.items() if t == kind)
     db.snapshot_put([(row_key, {**front, "status": status})])
     db.enqueue_service(f"close-{key}-{now:%Y%m%d%H%M%S}", f"close-{key}.json", {"action": "close", **base, "status": status})
+    return "ok", title
+
+
+def reschedule(db: Database, key: str, when: datetime, has_time: bool, now: datetime) -> tuple[str, str]:
+    """Переносит дело на момент when. Со временем: напоминание придёт в Telegram в этот час. Без времени: только день."""
+    found = _find(db, key)
+    if not found:
+        return "missing", ""
+    row_key, front = found
+    title, kind = str(front.get("title", "")), str(front.get("type", ""))
+    if str(front.get("status", "")).strip().lower() in CLOSED:
+        return "already", title
+    day, stamp = when.date(), when.strftime("%Y-%m-%dT%H:%M")
+    updates: dict[str, str] = {}
+    if kind == "task":
+        if has_time:
+            updates["remind_at"] = stamp
+            if front.get("due"):
+                updates["due"] = day.isoformat()
+        else:
+            if front.get("due"):
+                updates["due"] = _with_date(front.get("due"), day)
+            if front.get("remind_at"):
+                updates["remind_at"] = _with_date(front.get("remind_at"), day)
+        if not updates:
+            updates["due"] = day.isoformat()
+    elif kind == "event":
+        updates["event_at"] = stamp if has_time else _with_date(front.get("event_at"), day)
+    elif kind == "home":
+        updates["next_due"] = day.isoformat()
+    elif kind in ("project", "case"):
+        updates["deadline"] = day.isoformat()
+    else:
+        return "unsupported", title
+    db.snapshot_put([(row_key, {**front, **updates})])
+    db.enqueue_service(f"set-{key}-{now:%Y%m%d%H%M%S}", f"set-{key}.json", {
+        "action": "set", "title": title, "created": str(front.get("created", "")), "type": kind, "fields": updates})
     return "ok", title
 
 

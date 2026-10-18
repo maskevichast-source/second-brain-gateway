@@ -38,7 +38,7 @@ def test_digest_is_numbered_and_hides_own_birthday(db):
     assert "1. 17 октября (сб), просрочено на 1 дн.: Заехать к отцу" in text
     assert "2. 18 октября (вс): Купить молоко" in text and "Семейный завтрак" in text
     assert "Серик" in text and "Владислав" not in text                  # своё имя и дубль «— профиль» не показываем
-    assert [b[0] for b in buttons[0]] == ["✅ 1", "🗑 1", "⏭ 1"] and buttons[0][0][1] == "dn:" + "a" * 12
+    assert [b[0] for b in buttons[0]] == ["1", "2", "3"] and buttons[0][0][1] == "it:" + "a" * 12     # только ряд номеров
     assert "сделано 1" in text
 
 
@@ -123,3 +123,89 @@ def test_buttons_work_through_callbacks(db):
     assert reply["method"] == "answerCallbackQuery" and "Готово: Заехать к отцу" in reply["text"]
     again = telegram._callback({"id": "2", "from": {"id": 111}, "data": "dn:" + "a" * 12}, settings, db, lambda: NOW)
     assert "Уже закрыто" in again["text"]
+
+
+def test_panel_options_follow_time_of_day(db):
+    morning = actions.panel(db, "a" * 12, datetime(2026, 10, 18, 10, 0))
+    labels = [b[0] for row in morning[1] for b in row]
+    assert "✅ Готово" in labels and "🗑 Отменить" in labels and "⏰ Через час" in labels and "⏰ После обеда (14:00)" in labels
+    assert "Заехать к отцу" in morning[0] and "просрочено на 1 дн." in morning[0]
+    night = actions.panel(db, "a" * 12, datetime(2026, 10, 18, 22, 30))
+    night_labels = [b[0] for row in night[1] for b in row]
+    assert "⏰ Через час" not in night_labels and "⏰ Завтра (9:00)" in night_labels
+    assert any(b[1] == "sx:" + "a" * 12 for row in morning[1] for b in row)       # «своё время»
+
+
+def test_reschedule_by_hours_sets_reminder_and_clears_overdue(db):
+    when = datetime(2026, 10, 18, 12, 0)
+    assert actions.reschedule(db, "a" * 12, when, True, NOW) == ("ok", "Заехать к отцу")
+    front = dict(db.snapshot_items())["a" * 40]
+    assert front["remind_at"] == "2026-10-18T12:00" and front["due"] == "2026-10-18"     # больше не просрочено
+    payload = json.loads(db.pending(service=True)[0]["markdown"])
+    assert payload["action"] == "set" and payload["fields"] == {"remind_at": "2026-10-18T12:00", "due": "2026-10-18"}
+    # в 12:00 бот сам напомнит, и у напоминания есть кнопка «другое время»
+    from app import scheduler
+    due = scheduler.due_reminders(db.snapshot_items(), db, datetime(2026, 10, 18, 12, 1))
+    assert len(due) == 1 and due[0][1] == "Заехать к отцу" and due[0][3] == "a" * 12
+    assert scheduler.due_reminders(db.snapshot_items(), db, datetime(2026, 10, 18, 11, 0)) == []
+
+
+def test_reschedule_by_day_keeps_clock_time(db):
+    db.snapshot_put([("g" * 40, {"title": "Позвонить маме", "type": "task", "status": "открыто",
+                                 "due": "2026-10-17", "remind_at": "2026-10-17T21:00"})])
+    actions.reschedule(db, "g" * 12, datetime(2026, 10, 21, 9, 0), False, NOW)
+    front = dict(db.snapshot_items())["g" * 40]
+    assert front["due"] == "2026-10-21" and front["remind_at"] == "2026-10-21T21:00"
+
+
+def test_typed_snooze_with_time_and_without(db):
+    actions.render_day(db, NOW)
+    reply = telegram._task_action(1, "snooze", "1 на 2 часа", db, NOW)
+    assert "Перенёс: Заехать к отцу — сегодня в 10:30. Напомню в Telegram." in reply["text"]
+    panel = telegram._task_action(1, "snooze", "2", db, NOW)               # без времени: варианты кнопками
+    assert panel["reply_markup"]["inline_keyboard"] and "Что сделать?" in panel["text"]
+    assert "Не понял, на когда" in telegram._task_action(1, "snooze", "2 на абракадабру", db, NOW)["text"]
+    assert "Выбери одно дело" in telegram._task_action(1, "snooze", "1 и 2", db, NOW)["text"]
+
+
+def test_callback_flow_edits_message_in_place(db):
+    from .conftest import make_settings
+    settings = make_settings(Path(db.path).parent, telegram_allowed_ids=frozenset({111}))
+    msg = {"message_id": 77, "chat": {"id": 111}, "text": "Сводка на 18 октября"}
+
+    def tap(data):
+        return telegram._callback({"id": "1", "from": {"id": 111}, "data": data, "message": msg}, settings, db, lambda: NOW)
+
+    opened = tap("it:" + "a" * 12)
+    assert opened["method"] == "editMessageText" and opened["message_id"] == 77 and "Что сделать?" in opened["text"]
+    snoozed = tap("sn:" + "a" * 12 + ":h2")
+    assert snoozed["method"] == "editMessageText" and "Заехать к отцу: сегодня в 10:30" in snoozed["text"]
+    assert "Напомню в Telegram" in snoozed["text"] and "1. " in snoozed["text"]          # и сразу обновлённый список
+    done = tap("dn:" + "b" * 12)
+    assert "Готово: Купить молоко" in done["text"] and "Купить молоко" not in done["text"].split("\n\n", 1)[1]
+    back = tap("bk:" + "0" * 12)
+    assert back["method"] == "editMessageText" and "Сводка на" in back["text"]
+    ask_time = tap("sx:" + "a" * 12)
+    assert ask_time["method"] == "sendMessage" and "На когда перенести" in ask_time["text"]
+    assert db.get_state(111)[0] == "resched"
+
+
+def test_free_time_answer_reschedules_and_new_note_is_not_swallowed(db):
+    import asyncio
+    from .conftest import make_settings
+    settings = make_settings(Path(db.path).parent, telegram_allowed_ids=frozenset({111}))
+    db.set_state(111, "resched", {"key": "a" * 12, "title": "Заехать к отцу"})
+
+    async def process(**kw):
+        return {"files": [], "needs_review": False, "count": 0}
+
+    def say(text, uid):
+        update = {"update_id": uid, "message": {"message_id": uid, "from": {"id": 111}, "chat": {"id": 111, "type": "private"}, "text": text}}
+        return asyncio.run(telegram.handle_update(update, settings=settings, db=db, process=process, clock=lambda: NOW))
+
+    assert "Не понял" in say("ну не знаю когда", 1)["text"] and db.get_state(111)[0] == "resched"
+    assert "Перенёс: Заехать к отцу — сегодня в 11:30" in say("через 3 часа", 2)["text"]
+    assert db.get_state(111) is None
+    db.set_state(111, "resched", {"key": "a" * 12, "title": "Заехать к отцу"})
+    say("Купить подарок маме на день рождения и торт", 3)           # похоже на новую запись, а не на время
+    assert db.get_state(111) is None
