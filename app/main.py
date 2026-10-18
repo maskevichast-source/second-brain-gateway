@@ -479,11 +479,6 @@ def create_app(
         if error:
             return error
         now = clock()
-        if kind == "import":
-            word = arg.strip().lower()
-            if not word.startswith("дом"):
-                return "Пока умею перенести список «Дом» из «Ады»: /import дом (ещё раз целиком: /import дом заново)."
-            return await ada_home_module.import_home(settings, db, now, force="заново" in word or "все" in word)
         ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
         result = await ask_module.answer_question(
             settings, notes, payload.question, now,
@@ -563,6 +558,11 @@ def create_app(
     async def secretary(kind: str, arg: str) -> str:
         """Ответы для Telegram по срезу на сервере."""
         now = clock()
+        if kind == "import":
+            word = arg.strip().lower()
+            if not word.startswith("дом"):
+                return "Пока умею перенести список «Дом» из «Ады»: /import дом (ещё раз целиком: /import дом заново)."
+            return await ada_home_module.import_home(settings, db, now, force="заново" in word or "все" in word)
         ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
         if kind == "budget":
             return ada_text or "Финансы «Ады» не подключены (см. README, часть 7)."
