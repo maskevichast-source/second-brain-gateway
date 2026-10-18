@@ -33,7 +33,7 @@ from . import people as people_module
 from . import llm as llm_module
 from .config import Settings, load_settings
 from .db import Database
-from .telegram import handle_update
+from .telegram import flush_stale_waiting, handle_update
 from .service import build_private_response, build_response
 from .textutil import find_urls, is_valid_capture_id, split_private
 from .vault import load_notes
@@ -170,9 +170,20 @@ def create_app(
                 logger.warning("webhook guard: %s", type(exc).__name__)
             await asyncio.sleep(3600)
 
+    async def waiting_guard():
+        """Раз в минуту сохраняет записи, на чьи уточнения не ответили, и сообщает об этом."""
+        notify = scheduler_module.telegram_sender(settings) if settings.telegram_bot_token else None
+        while True:
+            try:
+                await flush_stale_waiting(db, process, notify)
+            except Exception as exc:  # noqa: BLE001 - сторож не должен падать
+                logger.warning("waiting guard: %s", type(exc).__name__)
+            await asyncio.sleep(60)
+
     @asynccontextmanager
     async def lifespan(_app):
         task = None
+        waiter = asyncio.create_task(waiting_guard()) if settings.telegram_allowed_ids else None
         guard = asyncio.create_task(webhook_guard()) if webhook_module.configured(settings) else None
         if settings.telegram_bot_token and settings.telegram_allowed_ids:
             task = asyncio.create_task(scheduler_module.run_loop(
@@ -182,6 +193,8 @@ def create_app(
             task.cancel()
         if guard:
             guard.cancel()
+        if waiter:
+            waiter.cancel()
 
     snap_cache: dict = {}
 

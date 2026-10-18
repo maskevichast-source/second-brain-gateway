@@ -232,13 +232,157 @@ def test_known_people_are_sent_to_llm_and_canonicalised(tg):
     assert '"[[Серик]]"' in markdown
 
 
-def test_person_question_can_be_skipped_and_queue_continues(tg):
+def test_several_new_people_are_asked_in_one_question(tg):
     llm = StubLLM(people_result("Аля", "Борис"))
     client = tg(llm)
     first = send(client, update("позвонить Але и Борису", uid=1)).json()["text"]
-    assert "Кто такой(ая) Аля?" in first
-    assert "Кто такой(ая) Борис?" in send(client, update("/skip", uid=2)).json()["text"]
-    assert "пропустил Борис" in send(client, update("/skip", uid=3)).json()["text"]
+    assert "Новые люди: Аля, Борис" in first
+    assert "пропустил: Аля, Борис" in send(client, update("/skip", uid=2)).json()["text"]
+    assert send(client, update("/skip", uid=3)).json()["text"] == "Сейчас нечего пропускать."
+
+
+def test_one_answer_covers_everyone_named_and_asks_only_about_the_rest(tg):
+    llm = StubLLM(people_result("Аля", "Борис", "Виктор"))
+    client = tg(llm)
+    send(client, update("позвонить Але, Борису и Виктору", uid=1))
+    llm.value = result(note(type="person", title="Аля", body="коллега"))
+    reply = send(client, update("Аля — коллега, Борис — сосед", uid=2)).json()["text"]
+    assert "Карточки: Аля, Борис" in reply and "Кто такой(ая) Виктор?" in reply
+    assert "Данные о людях по именам Аля, Борис, Виктор" in llm.calls[-1]["content"]
+
+
+def test_dont_know_is_a_skip_not_a_card(tg):
+    llm = StubLLM(people_result("Аля"))
+    client = tg(llm)
+    send(client, update("позвонить Але", uid=1))
+    calls = len(llm.calls)
+    assert "пропустил Аля" in send(client, update("не знаю", uid=2)).json()["text"]
+    assert len(llm.calls) == calls
+
+
+def test_task_like_message_after_person_question_is_a_new_note(tg):
+    llm = StubLLM(people_result("Аля"))
+    client = tg(llm)
+    send(client, update("позвонить Але", uid=1))
+    llm.value = result(note(type="task", title="Молоко", body="молоко"))
+    reply = send(client, update("Купить молоко", uid=2)).json()["text"]
+    assert "Молоко" in reply and llm.calls[-1]["content"] == "Купить молоко"
+
+
+def _age_waiting(tmp_path, minutes):
+    import glob
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    for path in glob.glob(str(tmp_path / "data" / "*.db")):
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE tg_pending SET created_at = ?", (old,))
+
+
+def test_unanswered_clarification_is_saved_as_is_when_a_new_note_comes(tg, tmp_path):
+    llm = StubLLM(result(note(type="task", title="Первая", body="а"), needs_review=True, questions=["Когда?"]))
+    client = tg(llm)
+    assert "Нужно уточнение" in send(client, update("сделать это", uid=1)).json()["text"]
+    assert client.get("/pending", headers=auth()).json()["items"] == []
+    _age_waiting(tmp_path, 45)
+    llm.value = result(note(type="idea", title="Вторая", body="б"))
+    reply = send(client, update("новая мысль про дом", uid=2)).json()["text"]
+    assert "Прошлую запись" in reply and "уточнения не дождался" in reply and "Вторая" in reply
+    titles = [i["filename"] for i in client.get("/pending", headers=auth()).json()["items"]]
+    assert len(titles) == 2                      # старая сохранена как есть, новая не склеилась с ней
+    assert llm.calls[-1]["content"] == "новая мысль про дом" and llm.calls[-1]["clarifications"] == ""
+
+
+def test_fresh_clarification_still_takes_the_next_message(tg):
+    llm = StubLLM(result(note(type="task", title="Первая", body="а"), needs_review=True, questions=["Когда?"]))
+    client = tg(llm)
+    send(client, update("сделать это", uid=1))
+    llm.value = result(note(type="task", title="Первая", body="завтра"))
+    send(client, update("завтра", uid=2))
+    assert llm.calls[-1]["clarifications"] == "завтра" and llm.calls[-1]["content"] == "сделать это"
+
+
+def test_dont_know_to_clarification_saves_as_is(tg):
+    llm = StubLLM(result(note(type="task", title="Первая", body="а"), needs_review=True, questions=["Когда?"]))
+    client = tg(llm)
+    send(client, update("сделать это", uid=1))
+    llm.value = result(note(type="task", title="Первая", body="а"))
+    send(client, update("не знаю", uid=2))
+    assert llm.calls[-1]["clarifications"] == "" and len(client.get("/pending", headers=auth()).json()["items"]) == 1
+
+
+def test_background_flush_saves_forgotten_clarification_once(tmp_path):
+    import asyncio
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    from app import telegram
+    from app.db import Database
+
+    db = Database(tmp_path / "t.db")
+    db.init()
+    db.set_waiting(1, "tg-1", "сделать это")
+    old = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(timespec="seconds")
+    with sqlite3.connect(tmp_path / "t.db") as conn:
+        conn.execute("UPDATE tg_pending SET created_at = ?", (old,))
+    file = {"filename": "2026-10-18-x.md", "folder": "0-Inbox", "title": "Забытая", "markdown": "---\ntype: note\n---\nтекст",
+            "reminders": []}
+    calls = []
+
+    async def process(**kw):
+        calls.append(kw)
+        return {"files": [file], "needs_review": False}
+
+    sent = []
+
+    async def notify(chat_id, text):
+        sent.append((chat_id, text))
+
+    assert asyncio.run(telegram.flush_stale_waiting(db, process, notify)) == 1
+    assert calls[0]["revision"] == 2 and calls[0]["content"] == "сделать это"
+    assert "Забытая" in sent[0][1] and db.pending_count() == 1 and db.get_waiting(1) is None
+    assert asyncio.run(telegram.flush_stale_waiting(db, process, notify)) == 0     # повторно не сохраняется
+
+
+def test_two_fast_messages_do_not_race_on_interview_position(tmp_path):
+    import asyncio
+
+    from app import telegram
+    from app.db import Database
+
+    from .conftest import make_settings
+
+    db = Database(tmp_path / "t.db")
+    db.init()
+    db.set_state(111, "interview", {"i": 0, "saved": 0})
+    order = []
+
+    async def process(**kw):
+        order.append(kw["content"][-12:])
+        await asyncio.sleep(0.05)                 # пока первый ответ «думает», второй уже пришёл
+        return {"files": [], "needs_review": False, "count": 0}
+
+    settings = make_settings(tmp_path, telegram_allowed_ids=frozenset({111}))
+
+    async def go():
+        msgs = [{"update_id": n, "message": {"message_id": n, "from": {"id": 111}, "chat": {"id": 111, "type": "private"},
+                                              "text": f"ответ номер {n}"}} for n in (1, 2)]
+        await asyncio.gather(*(telegram.handle_update(m, settings=settings, db=db, process=process) for m in msgs))
+
+    asyncio.run(go())
+    assert db.get_state(111)[1]["i"] == 2          # оба ответа засчитаны на разные вопросы, а не на один
+
+
+def test_interview_meta_requests_are_not_answers(tg):
+    llm = StubLLM(result(note(type="note", title="Н", body="н")))
+    client = tg(llm)
+    send(client, update("/interview", uid=1))
+    send(client, update("ответ на первый", uid=2))
+    calls = len(llm.calls)
+    assert "[2/" in send(client, update("повтори вопрос", uid=3)).json()["text"]
+    assert "Вернулся назад" in send(client, update("назад", uid=4)).json()["text"]
+    assert "осталось" in send(client, update("сколько ещё осталось?", uid=5)).json()["text"]
+    assert len(llm.calls) == calls
 
 
 def test_new_thought_after_person_question_is_a_new_note(tg):

@@ -267,7 +267,7 @@ class Database:
         cutoff = (datetime.now(timezone.utc) - self.ttl).isoformat(timespec="seconds")
         with closing(self._connect()) as conn:
             row = conn.execute(
-                "SELECT capture_id, content, sources FROM tg_pending WHERE chat_id = ? AND created_at >= ?",
+                "SELECT capture_id, content, sources, created_at FROM tg_pending WHERE chat_id = ? AND created_at >= ?",
                 (chat_id, cutoff),
             ).fetchone()
         if not row:
@@ -275,6 +275,20 @@ class Database:
         data = dict(row)
         data["sources"] = json.loads(data.get("sources") or "[]")
         return data
+
+    def stale_waiting(self, minutes: float) -> list[dict]:
+        """Записи, которые ждут уточнения дольше minutes минут (их надо сохранить как есть, а не потерять)."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT chat_id, capture_id, content, sources, created_at FROM tg_pending WHERE created_at < ?", (cutoff,)
+            ).fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["sources"] = json.loads(data.get("sources") or "[]")
+            out.append(data)
+        return out
 
     def clear_waiting(self, chat_id: int) -> None:
         with closing(self._connect()) as conn:

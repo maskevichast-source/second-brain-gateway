@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Awaitable, Callable
@@ -28,10 +29,10 @@ logger = logging.getLogger(__name__)
 HELP = (
     "Пришли мысль, ссылку или список дел, и я превращу это в заметку для Obsidian.\n\n"
     "• Начни сообщение с «!» или «секрет:», чтобы текст не уходил в ИИ.\n"
-    "• Если я переспрошу, ответь одним сообщением или напиши /skip, чтобы сохранить как есть.\n"
+    "• Если я переспрошу, ответь одним сообщением или напиши /skip (или «не знаю», «как есть»), чтобы сохранить как есть. Не ответишь за 30 минут — сохраню сам.\n"
     "• Если в записи новый человек, я спрошу, кто это.\n"
     "• /diary — вечерний дневник: расспрошу про день. Или сразу «дневник: текст». Время напоминания: /diary время 22:00.\n"
-    "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки.\n"
+    "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки. Посреди интервью можно писать «повтори», «назад», «сколько осталось», «стоп»; /interview 22 — с вопроса 22.\n"
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
     "/who Имя (или /brief) — что знать перед встречей, /promises — кто что кому обещал, /radar — с кем давно не общались, /budget — бюджет из «Ады».\n"
     "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
@@ -44,6 +45,11 @@ HELP = (
 )
 
 Processor = Callable[..., Awaitable[dict]]
+WAITING_PATIENCE_MIN = 30                  # столько минут бот ждёт ответ на уточнение, потом сохраняет запись как есть
+_LOCKS: dict[int, asyncio.Lock] = {}       # сообщения одного чата обрабатываются по очереди: место в диалоге не «гоняется»
+_TASKISH = re.compile(r"^(купи|купить|заказ|позвони|позвонить|напомни|оплати|оплатить|записаться|забрать|отправить|"
+                      r"сделать|проверить|завтра|сегодня|послезавтра|не забыть)", re.I)
+_SKIP_PHRASE = re.compile(r"^(пропусти|пропустим|сохрани как есть|как есть|оставь как есть|не надо|не нужно)\W*$", re.I)
 _URL = re.compile(r"https?://", re.I)
 
 
@@ -114,17 +120,36 @@ async def handle_update(
 
     update_id = update.get("update_id")
     dedupe_key = f"tgu-{update_id}" if isinstance(update_id, int) else None
-    if dedupe_key:
-        cached = db.get(dedupe_key, 1)
-        if cached:
-            return cached
+    async with _LOCKS.setdefault(chat_id, asyncio.Lock()):
+        if dedupe_key:
+            cached = db.get(dedupe_key, 1)
+            if cached:
+                return cached
+        reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process,
+                              secretary=secretary, clock=clock, transcriber=transcriber, backup_sender=backup_sender,
+                              file_fetcher=file_fetcher, vision=vision)
+        if dedupe_key and reply:
+            db.save(capture_id=dedupe_key, revision=1, response=reply)
+        return reply
 
-    reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process,
-                          secretary=secretary, clock=clock, transcriber=transcriber, backup_sender=backup_sender,
-                          file_fetcher=file_fetcher, vision=vision)
-    if dedupe_key and reply:
-        db.save(capture_id=dedupe_key, revision=1, response=reply)
-    return reply
+
+async def flush_stale_waiting(db: Database, process: Processor, notify=None, minutes: float = WAITING_PATIENCE_MIN) -> int:
+    """Запись, на уточнение которой не ответили, сохраняется как есть: молчание не должно терять заметки."""
+    saved = 0
+    for row in db.stale_waiting(minutes):
+        async with _LOCKS.setdefault(row["chat_id"], asyncio.Lock()):
+            current = db.get_waiting(row["chat_id"])
+            if not current or current["capture_id"] != row["capture_id"]:
+                continue                                  # пока ждали очередь, пользователь успел ответить
+            sources_module.CURRENT.set(row["sources"])
+            response = await _save(db, process, capture_id=row["capture_id"], content=row["content"], revision=2)
+            db.clear_waiting(row["chat_id"])
+            saved += 1
+            if notify:
+                title = (response.get("files") or [{}])[0].get("title", "запись")
+                await notify(row["chat_id"], f"⏳ Не дождался уточнения и сохранил «{title}» как есть. "
+                                             "Поправить можно в Obsidian.")
+    return saved
 
 
 async def _save(db: Database, process: Processor, *, capture_id: str, content: str, revision: int,
@@ -152,10 +177,11 @@ def _leave_person(chat_id: int, db: Database, resume: dict | None, paused: bool 
         db.clear_state(chat_id)
 
 
-def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str) -> str:
-    """Запоминает новых людей и возвращает текст вопроса про первого из них."""
+def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str, batch: bool | None = None) -> str:
+    """Запоминает новых людей и возвращает вопрос: про одного или сразу про всех новых из записи."""
     for name in names:
         db.upsert_person(name)               # чтобы не переспрашивать про того же человека снова
+    batch = len(names) > 1 if batch is None else batch
     current, rest = names[0], names[1:4]
     state = db.get_state(chat_id)
     resume = None                            # интервью не должно теряться, пока идёт вопрос про человека
@@ -164,11 +190,20 @@ def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str) -> st
     elif state and state[0] == "person":
         resume = state[1].get("resume")
     data = {"current": current, "rest": rest}
+    if batch and rest:
+        data["batch"] = True
     if resume:
         data["resume"] = resume
     db.set_state(chat_id, "person", data)
+    if batch and rest:
+        return (f"{prefix}\n\nНовые люди: {', '.join(names[:4])}. Напиши про каждого роль и что знаешь (телефон, где работает, "
+                "день рождения) одним сообщением, можно только про некоторых. /skip — пропустить всех.")
     return (f"{prefix}\n\nКто такой(ая) {current}? Напиши роль и что знаешь (телефон, где работает, "
             "день рождения) одним сообщением или /skip.")
+
+
+def _stem(name: str) -> str:
+    return re.sub(r"[^а-яa-z0-9]", "", name.lower().replace("ё", "е"))[:4]
 
 
 async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Settings, db: Database, process: Processor,
@@ -191,7 +226,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         low = text.lower()
         if "интервью" in low and re.search(r"продолж|дальше|давай|начн|запуст|вернись|вернём|вернемся|вернёмся", low):
             command, text = "/interview", "/interview"
-        elif re.match(r"^(стоп|хватит|пауза|остановись|останови)\W*$", low):
+        elif re.match(r"^(стоп|хватит|пауза|остановись|останови|закончим|заканчиваем)\W*$", low):
             current = db.get_state(chat_id)
             if current and current[0] in ("interview", "person", "diary"):
                 command, text = "/stop", "/stop"
@@ -208,6 +243,10 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         if command in ("/brief", "/who") and not arg:
             return _reply(chat_id, "О ком? Например: /who Серик")
         return _reply(chat_id, await secretary(command[1:], arg[:1000]))
+    if command == "/done":
+        current = db.get_state(chat_id)
+        if current and current[0] in ("interview", "person"):
+            command, text = "/stop", "/stop"
     if command in ("/diary", "/дневник"):
         return await _diary_command(chat_id, update_id, text, settings, db, process, now)
     if command == "/forget":
@@ -262,7 +301,15 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return await _diary_step(chat_id, update_id, text, command, state[1], settings, db, process, now)
     # Ответ на вопрос про нового человека или интервью. Длинное сообщение или ссылка считаются новой записью.
     in_interview = bool(state and state[0] == "interview")   # в интервью длинный ответ остаётся ответом, а не новой записью
-    if state and not (command == "" and not in_interview and (len(text) > 400 or _URL.search(text))) and command in ("", "/skip"):
+    new_note = bool(state and state[0] == "person" and command == "" and (
+        text.startswith("Переслано от") or "вложение в Telegram" in text.lower() or
+        (len(text) < 120 and _TASKISH.match(text))))          # пересылка, файл или явное дело: это новая запись, а не ответ про человека
+    if state and state[0] == "interview" and command == "" and len(text) <= 60:
+        meta = _interview_meta(chat_id, text, state[1], db)
+        if meta:
+            return meta
+    if state and not new_note and not (command == "" and not in_interview and (len(text) > 400 or _URL.search(text))) \
+            and command in ("", "/skip"):
         kind, data = state
         if kind == "interview":
             return await _interview_step(chat_id, update_id, text, command, data, db, process, settings, now)
@@ -272,6 +319,19 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         _leave_person(chat_id, db, state[1].get("resume"))   # ушёл в новую запись: вопрос про человека снимаем, интервью остаётся
 
     waiting = db.get_waiting(chat_id)
+    expired = ""
+    if waiting and command == "":
+        if _minutes_ago(waiting.get("created_at")) > WAITING_PATIENCE_MIN:
+            mine = sources_module.CURRENT.get()                           # вложения нового сообщения
+            sources_module.CURRENT.set(waiting.get("sources") or [])      # не дождались ответа: старую запись сохраняем как есть
+            old = await _save(db, process, capture_id=waiting["capture_id"], content=waiting["content"], revision=2)
+            db.clear_waiting(chat_id)
+            title = (old.get("files") or [{}])[0].get("title", "запись")
+            expired = f"⏳ Прошлую запись «{title}» сохранил как есть: уточнения не дождался.\n\n"
+            sources_module.CURRENT.set(mine)
+            waiting = None
+        elif interview.is_non_answer(split_private(text)[1]) or _SKIP_PHRASE.match(text):
+            command = "/skip"                                              # «не знаю», «как есть» = сохранить без уточнений
     if command == "/skip":
         if not waiting:
             return _reply(chat_id, "Сейчас нечего пропускать.")
@@ -297,12 +357,20 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     if response.get("needs_review") and revision == 1:
         db.set_waiting(chat_id, capture_id, content, sources_module.CURRENT.get())
         questions = "\n".join(f"• {q}" for q in response.get("review_questions", []))
-        return _reply(chat_id, f"Нужно уточнение:\n{questions}\n\nОтветь одним сообщением или /skip.")
-    summary = _summary(response)
+        return _reply(chat_id, f"{expired}Нужно уточнение:\n{questions}\n\nОтветь одним сообщением или /skip.")
+    summary = expired + _summary(response)
     new = [n for n in response.get("new_people", []) if not response.get("private")]
     if new:
         return _reply(chat_id, _ask_person(chat_id, db, new[:4], summary))
     return _reply(chat_id, summary)
+
+
+def _minutes_ago(stamp: str | None) -> float:
+    from datetime import datetime, timezone
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds() / 60
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _status_text(db: Database) -> str:
@@ -465,18 +533,30 @@ async def _answer_core(message: dict, chat_id: int, update_id, *, settings: Sett
 
 async def _person_step(chat_id, update_id, text, command, data, db, process, settings) -> dict:
     current, rest = data["current"], data.get("rest", [])
-    prefix = ""
-    if command != "/skip":
+    batch = bool(data.get("batch"))
+    names = [current] + list(rest)
+    resume = data.get("resume")
+    plain = split_private(text)[1]
+    skip = command == "/skip" or interview.is_non_answer(plain)
+    skip_all = skip and (batch or bool(re.search(r"\bвс(е|ех)\b|\ball\b", text.lower())))
+    left: list[str] = []
+    if skip:
+        prefix = "Ок, пропустил: " + ", ".join(names) + "." if skip_all else f"Ок, пропустил {current}."
+        left = [] if skip_all else list(rest)
+    elif batch:
+        content = _wrap(text, lambda t: f"Данные о людях по именам {', '.join(names)} (карточки новых знакомых, тип person): {t}")
+        response = await _save(db, process, capture_id=f"tgp-{update_id}", content=content, revision=2)
+        low = plain.lower().replace("ё", "е")
+        left = [n for n in names if _stem(n) and _stem(n) not in low]       # про кого в ответе ни слова: спросим отдельно
+        prefix = "🔒 сохранил без ИИ" if response.get("private") else \
+            "✅ Карточки: " + ", ".join(n for n in names if n not in left)
+    else:
         content = _wrap(text, lambda t: f"Данные о человеке по имени {current} (карточка нового знакомого, тип person): {t}")
         response = await _save(db, process, capture_id=f"tgp-{update_id}", content=content, revision=2)
-        prefix = f"✅ Карточка: {current}"
-        if response.get("private"):
-            prefix = f"🔒 {current}: сохранил без ИИ"
-    else:
-        prefix = f"Ок, пропустил {current}."
-    if rest:
-        return _reply(chat_id, _ask_person(chat_id, db, rest, prefix))
-    resume = data.get("resume")
+        prefix = f"🔒 {current}: сохранил без ИИ" if response.get("private") else f"✅ Карточка: {current}"
+        left = list(rest)
+    if left:
+        return _reply(chat_id, _ask_person(chat_id, db, left, prefix, batch=False))
     _leave_person(chat_id, db, resume)
     if resume:
         queue = _queue(resume)
@@ -492,6 +572,24 @@ def _queue(data: dict) -> list[int]:
     if isinstance(queue, list) and queue and all(isinstance(i, int) and 0 <= i < len(interview.QUESTIONS) for i in queue):
         return queue
     return list(range(len(interview.QUESTIONS)))
+
+
+def _interview_meta(chat_id: int, text: str, data: dict, db: Database) -> dict | None:
+    """Живые просьбы посреди интервью («повтори», «назад», «сколько осталось») — не ответы на вопрос."""
+    low = text.lower().strip(" .!?")
+    queue = _queue(data)
+    position = min(int(data.get("i", 0)), len(queue) - 1)
+    if re.match(r"^(повтори|повторите|ещё раз|еще раз|что за вопрос|какой вопрос|какой сейчас вопрос|напомни вопрос)", low):
+        return _reply(chat_id, interview.question_text(queue[position], position, len(queue)))
+    if re.match(r"^(назад|вернись назад|предыдущий( вопрос)?|верни предыдущий( вопрос)?)$", low):
+        position = max(0, position - 1)
+        db.set_state(chat_id, "interview", {**data, "i": position})
+        return _reply(chat_id, "Вернулся назад.\n\n" + interview.question_text(queue[position], position, len(queue)))
+    if re.search(r"сколько (ещё |еще )?(осталось|вопросов|до конца)", low):
+        left = len(queue) - position
+        return _reply(chat_id, f"Сейчас вопрос {position + 1} из {len(queue)}, осталось {left}. "
+                               "Можно остановиться: /stop, продолжить потом: /interview.")
+    return None
 
 
 def _interview_start(chat_id: int, db: Database, arg: str = "") -> dict:

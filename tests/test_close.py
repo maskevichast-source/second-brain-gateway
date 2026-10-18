@@ -160,7 +160,7 @@ def test_interview_position_survives_person_question(tmp_path):
     db = Database(tmp_path / "t.db")
     db.init()
     db.set_state(1, "interview", {"i": 20, "saved": 3})
-    telegram._ask_person(1, db, ["Ерасыл", "Виктор"], "ok")
+    telegram._ask_person(1, db, ["Ерасыл", "Виктор"], "ok", batch=False)
     state = db.get_state(1)
     assert state[0] == "person" and state[1]["resume"]["i"] == 20
 
