@@ -12,9 +12,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import vault_people as vp
@@ -94,9 +95,54 @@ def card_to_facts(card: dict[str, list[str]]) -> tuple[str, dict[str, list[str]]
     return name, facts
 
 
-def run(vcf: Path, vault: Path, dry_run: bool = False, now: datetime | None = None) -> dict[str, list[str]]:
+def parse_rev(value: str) -> datetime | None:
+    """Дата последнего изменения контакта из строки REV (20250131T101500Z или 2025-01-31T10:15:00Z)."""
+    m = re.match(r"(\d{4})-?(\d{2})-?(\d{2})", value.strip())
+    try:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+    except ValueError:
+        return None
+
+
+def _tokens(name: str) -> frozenset[str]:
+    return frozenset(w for w in re.findall(r"[\w]+", name.lower().replace("ё", "е")) if len(w) > 1)
+
+
+def telegram_active(path: Path, since: datetime) -> list[frozenset[str]]:
+    """Имена из личных чатов Telegram, где было хоть одно сообщение после даты (экспорт result.json из Telegram Desktop)."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    chats = (data.get("chats") or {}).get("list") or data.get("chats") or []
+    active = []
+    for chat in chats if isinstance(chats, list) else []:
+        if chat.get("type") not in ("personal_chat", None) or not chat.get("name"):
+            continue
+        last = None
+        for msg in chat.get("messages") or []:
+            try:
+                moment = datetime.fromisoformat(str(msg.get("date")))
+            except ValueError:
+                continue
+            last = moment if last is None or moment > last else last
+        if last and last >= since:
+            active.append(_tokens(chat["name"]))
+    return [t for t in active if t]
+
+
+def is_recent(card: dict[str, list[str]], name: str, since: datetime | None, tg: list[frozenset[str]]) -> bool:
+    if since is None:
+        return True
+    rev = parse_rev((card.get("REV") or [""])[0])
+    if rev and rev >= since:
+        return True
+    mine = _tokens(name)
+    return bool(mine) and any(mine <= chat or (chat <= mine and len(chat) > 1) for chat in tg)
+
+
+def run(vcf: Path, vault: Path, dry_run: bool = False, now: datetime | None = None,
+        since: datetime | None = None, tg: list[frozenset[str]] | None = None) -> dict[str, list[str]]:
     now = now or datetime.now()
-    report = {"created": [], "updated": []}
+    tg = tg or []
+    report = {"created": [], "updated": [], "skipped": 0}
     folder = vault / vp.PEOPLE_DIR
     seen = set()
     for card in parse_vcards(vcf.read_text(encoding="utf-8-sig", errors="replace")):
@@ -105,6 +151,9 @@ def run(vcf: Path, vault: Path, dry_run: bool = False, now: datetime | None = No
             continue
         name, facts = parsed
         if name in seen:
+            continue
+        if not is_recent(card, name, since, tg):
+            report["skipped"] += 1
             continue
         seen.add(name)
         path = folder / f"{name}.md"
@@ -127,6 +176,8 @@ def main(argv=None) -> int:
     parser.add_argument("vcf", help="файл .vcf")
     parser.add_argument("vault", help="папка хранилища SecondBrain")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--days", type=int, default=0, help="только контакты, менявшиеся за последние N дней (например 365)")
+    parser.add_argument("--telegram", help="result.json из экспорта Telegram Desktop: добавить тех, с кем была переписка за этот срок")
     args = parser.parse_args(argv)
     vcf, vault = Path(args.vcf), Path(args.vault)
     if not vcf.is_file():
@@ -135,9 +186,17 @@ def main(argv=None) -> int:
     if not vault.is_dir():
         print(f"Папка не найдена: {vault}")
         return 1
-    report = run(vcf, vault, args.dry_run)
+    since = datetime.now() - timedelta(days=args.days) if args.days > 0 else None
+    tg = []
+    if args.telegram:
+        try:
+            tg = telegram_active(Path(args.telegram), since or datetime.now() - timedelta(days=365))
+        except (OSError, ValueError) as exc:
+            print(f"Не удалось прочитать экспорт Telegram: {exc}")
+            return 1
+    report = run(vcf, vault, args.dry_run, since=since, tg=tg)
     prefix = "Было бы: " if args.dry_run else ""
-    print(f"{prefix}новых карточек: {len(report['created'])}, дополнено: {len(report['updated'])}")
+    print(f"{prefix}новых карточек: {len(report['created'])}, дополнено: {len(report['updated'])}, пропущено старых: {report['skipped']}")
     return 0
 
 

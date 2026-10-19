@@ -62,7 +62,7 @@ def test_run_creates_and_merges_and_is_idempotent(tmp_path):
     card = (vault / "1-Люди" / "Серик Серикбаев.md").read_text(encoding="utf-8")
     assert 'phones:\n  - "+7 707 000 00 00"\n  - "+7 701 111 11 11"' in card and 'birthday: "1990-03-05"' in card
     assert 'birthday: "01-01"' in (vault / "1-Люди" / "Аля Петрова.md").read_text(encoding="utf-8")   # не затёрто
-    assert vc.run(vcf, vault, now=NOW) == {"created": [], "updated": []}
+    assert vc.run(vcf, vault, now=NOW) == {"created": [], "updated": [], "skipped": 0}
 
 
 def test_dry_run_and_missing_files(tmp_path):
@@ -70,3 +70,26 @@ def test_dry_run_and_missing_files(tmp_path):
     vcf.write_text(VCF, encoding="utf-8")
     assert vc.main([str(vcf), str(tmp_path), "--dry-run"]) == 0 and not (tmp_path / "1-Люди").exists()
     assert vc.main([str(tmp_path / "нет.vcf"), str(tmp_path)]) == 1
+
+
+def test_recent_filter_by_rev_and_telegram(tmp_path):
+    import json
+    from datetime import datetime
+    vcf = tmp_path / "c.vcf"
+    vcf.write_text(
+        "BEGIN:VCARD\nFN:Свежий Контакт\nTEL:+7 700 000 00 01\nREV:20260801T100000Z\nEND:VCARD\n"
+        "BEGIN:VCARD\nFN:Старый Контакт\nTEL:+7 700 000 00 02\nREV:20190101T100000Z\nEND:VCARD\n"
+        "BEGIN:VCARD\nFN:Пётр Переписка\nTEL:+7 700 000 00 03\nREV:20190101T100000Z\nEND:VCARD\n",
+        encoding="utf-8")
+    chats = tmp_path / "result.json"
+    chats.write_text(json.dumps({"chats": {"list": [
+        {"type": "personal_chat", "name": "Пётр Переписка", "messages": [{"date": "2026-09-01T10:00:00"}]},
+        {"type": "personal_chat", "name": "Старый Контакт", "messages": [{"date": "2020-01-01T10:00:00"}]}]}}),
+        encoding="utf-8")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    since = datetime(2025, 10, 19)
+    tg = vc.telegram_active(chats, since)
+    report = vc.run(vcf, vault, since=since, tg=tg)
+    assert sorted(report["created"]) == ["Пётр Переписка", "Свежий Контакт"]
+    assert report["skipped"] == 1
