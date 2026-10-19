@@ -620,8 +620,10 @@ async def _answer_core(message: dict, chat_id: int, update_id, *, settings: Sett
         return _reply(chat_id, "Не смог расшифровать голосовое. Попробуй ещё раз или напиши текстом.")
     reply = await _answer_text({**message, "text": transcript}, chat_id, update_id, settings=settings, db=db,
                                process=process, secretary=secretary, clock=clock)
-    echo = f"🎙 «{one_line(transcript, 400)}»\n\n"
-    return {**reply, "text": (echo + str(reply.get("text", "")))[:4000]}
+    shown = one_line(transcript, 2500)
+    echo = f"🎙 «{shown}»" + ("… (в заметку записано целиком)" if len(transcript) > len(shown) else "") + "\n\n"
+    body = str(reply.get("text", ""))
+    return {**reply, "text": (echo + body)[:4000] if len(echo) + len(body) <= 4000 else (echo[:1800] + "\n\n" + body)[:4000]}
 
 
 # ---------- новый человек ----------

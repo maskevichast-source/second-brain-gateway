@@ -19,13 +19,22 @@ MAX_BYTES = 20 * 1024 * 1024          # лимит скачивания файл
 
 
 def build_hint(names: list[str], facts: list[str]) -> str:
-    """Подсказка распознавателю: имена людей и клички из фактов, чтобы «Янка» не превращалась в «янки»."""
-    words: list[str] = []
-    for item in [*names, *facts]:
-        for word in item.replace(",", " ").replace(".", " ").split():
-            if word[:1].isupper() and len(word) > 2 and word not in words:
-                words.append(word)
-    return ("Имена: " + ", ".join(words[:40])) if words else ""
+    """Подсказка распознавателю (Whisper принимает ~224 токена): сначала факты целиком («Компания называется
+    Идея Декор»), потом имена людей. Так «Янка» не становится «янки», а название фирмы не пишется латиницей."""
+    parts: list[str] = []
+    total = 0
+    for item in [*reversed(facts), *names]:                       # свежие факты важнее старых
+        item = " ".join(str(item).split())
+        if not item or item in parts:
+            continue
+        if total + len(item) + 2 > HINT_CHARS:
+            continue
+        parts.append(item)
+        total += len(item) + 2
+    return ". ".join(parts)
+
+
+HINT_CHARS = 380
 
 
 def configured(settings: Settings) -> bool:
@@ -59,7 +68,7 @@ async def transcribe(settings: Settings, file_id: str, http_client: httpx.AsyncC
             headers={"Authorization": f"Bearer {settings.stt_api_key}"},
             files={"file": (filename, audio.content, "audio/ogg")},
             data={"model": settings.stt_model, "language": "ru", "response_format": "json",
-                  **({"prompt": hint[:400]} if hint else {})},
+                  **({"prompt": hint[:HINT_CHARS + 20]} if hint else {})},
         )
         response.raise_for_status()
         text = str(response.json().get("text", "")).strip()
