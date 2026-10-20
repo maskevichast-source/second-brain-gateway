@@ -93,6 +93,26 @@ def test_clarification_round_trip(tg):
     assert send(client, update("/skip", uid=3)).json()["text"] == "Сейчас нечего пропускать."
 
 
+def test_private_clarification_never_reaches_the_llm(tg):
+    ambiguous = result(note(type="task", title="Позвонить", body="Позвонить"), needs_review=True, questions=["Кому?"])
+    llm = StubLLM(ambiguous)
+    client = tg(llm)
+    send(client, update("позвонить тому парню", uid=1))
+    send(client, update("! код от сейфа 4321", uid=2))
+    assert len(llm.calls) == 1                                  # второй раз ИИ не вызывали
+    items = client.get("/pending", headers=auth()).json()["items"]
+    assert len(items) == 1 and "4321" in items[0]["markdown"]
+
+
+def test_nothing_to_save_does_not_drop_an_ordinary_note(tg):
+    from app.llm import LLMResult
+
+    client = tg(StubLLM(LLMResult(notes=[], nothing_to_save=True)))
+    send(client, update("Купить хлеб и молоко", uid=1))
+    items = client.get("/pending", headers=auth()).json()["items"]
+    assert len(items) == 1 and "Купить хлеб и молоко" in items[0]["markdown"]       # сохранено «как есть»
+
+
 def test_skip_saves_as_is(tg):
     ambiguous = result(note(type="task", title="Позвонить", body="Позвонить"), needs_review=True, questions=["Кому?"])
     client = tg(StubLLM(ambiguous))

@@ -437,6 +437,10 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return _reply(chat_id, "Не знаю такой команды. " + HELP.split("\n\n")[0])
     elif waiting:
         capture_id, content, clarifications, revision = waiting["capture_id"], waiting["content"], text, 2
+        is_private, plain = split_private(text)
+        if is_private:
+            # ответ на уточнение помечен «!»/«секрет:»: ничего не отправляем ИИ, вся запись сохраняется как приватная
+            content, clarifications = f"! {waiting['content']}\n{plain}".strip(), ""
         if waiting.get("sources"):
             sources_module.CURRENT.set(waiting["sources"])
     else:

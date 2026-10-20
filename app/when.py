@@ -60,6 +60,8 @@ def _date_in(t: str, today: date) -> tuple[date | None, str]:
         if not m:
             return None, t
         day, month = int(m.group(1)), int(m.group(2))
+        if not m.group(3) and day < 24 and month < 60 and re.search(r"\bв\s*$", t[:m.start()]):
+            return None, t                  # «в 18.10» — это время 18:10, а не 18 октября
         year = int(m.group(3)) + (2000 if m.group(3) and len(m.group(3)) == 2 else 0) if m.group(3) else None
         rest = t[:m.start()] + " " + t[m.end():]
     if not month or not 1 <= day <= 31:

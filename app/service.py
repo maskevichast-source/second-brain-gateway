@@ -311,6 +311,10 @@ def build_response(
     link_map = {info.url: info for info in links}
     fallback = result is None
     raw_notes = _fallback_notes(content, links) if fallback else list(result.notes)
+    if not raw_notes and not fallback and not _INTERVIEW_HEAD.match(content):
+        # «нечего сохранять» допустимо только для ответа в интервью; для обычной записи (в том числе когда страница
+        # или сам текст подсказал ИИ ничего не сохранять) заметка не должна пропасть
+        raw_notes = _fallback_notes(content, links)
     if not raw_notes:                      # ИИ нашёл, что сохранять нечего (например, ответ «нет» в интервью)
         return {
             "status": "success", "schema": schema.SCHEMA_VERSION, "capture_id": capture_id, "revision": revision,
