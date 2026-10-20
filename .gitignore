@@ -3,3 +3,5 @@ data/
 __pycache__/
 .pytest_cache/
 .venv/
+
+tools/windows/config.txt
