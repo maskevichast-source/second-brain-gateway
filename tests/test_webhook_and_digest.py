@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from datetime import date, datetime
 
 import httpx
@@ -39,6 +40,11 @@ def test_webhook_left_alone_when_correct_and_skipped_without_config(tmp_path):
     assert asyncio.run(webhook.ensure_webhook(_settings(tmp_path), _client(state))) == "ok" and "set" not in state
     state = {"info": {"url": "https://sb.example.app/telegram/webhook", "last_error_message": "Wrong response"}}
     assert asyncio.run(webhook.ensure_webhook(_settings(tmp_path), _client(state))) == "set"   # была ошибка доставки
+    url = "https://sb.example.app/telegram/webhook"
+    fresh = {"info": {"url": url, "last_error_message": "Wrong response", "last_error_date": int(time.time()) - 600}}
+    assert asyncio.run(webhook.ensure_webhook(_settings(tmp_path), _client(fresh))) == "set"
+    stale = {"info": {"url": url, "last_error_message": "Wrong response", "last_error_date": int(time.time()) - 5 * 3600}}
+    assert asyncio.run(webhook.ensure_webhook(_settings(tmp_path), _client(stale))) == "ok" and "set" not in stale
     bare = make_settings(tmp_path)
     assert asyncio.run(webhook.ensure_webhook(bare)) == "skipped" and not webhook.configured(bare)
 

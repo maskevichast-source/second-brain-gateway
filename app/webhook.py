@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 
@@ -27,6 +28,22 @@ def configured(settings: Settings) -> bool:
     return bool(settings.telegram_bot_token and settings.telegram_secret and settings.public_url)
 
 
+FRESH_ERROR_SECONDS = 2 * 3600
+
+
+def _has_fresh_error(info: dict) -> bool:
+    """Telegram хранит last_error_message после любой прошлой ошибки и сам её не стирает: без проверки возраста
+    сервис переставлял бы вебхук каждый час впустую. Свежей считается ошибка не старше двух часов (дата неизвестна —
+    считаем свежей)."""
+    if not info.get("last_error_message"):
+        return False
+    stamp = info.get("last_error_date")
+    try:
+        return time.time() - float(stamp) <= FRESH_ERROR_SECONDS
+    except (TypeError, ValueError):
+        return True
+
+
 async def ensure_webhook(settings: Settings, client: httpx.AsyncClient | None = None) -> str:
     """'ok' (уже стоит), 'set' (поставил заново), 'skipped' (нечем настраивать) или 'failed'."""
     if not configured(settings):
@@ -40,7 +57,7 @@ async def ensure_webhook(settings: Settings, client: httpx.AsyncClient | None = 
         if not info.get("ok"):
             raise ValueError(str(info.get("description") or "getWebhookInfo"))
         current = info.get("result") or {}
-        if current.get("url") == want and not current.get("last_error_message"):
+        if current.get("url") == want and not _has_fresh_error(current):
             return "ok"
         reply = (await client.post(f"{base}/setWebhook", json={
             "url": want, "secret_token": settings.telegram_secret, "allowed_updates": ALLOWED,
