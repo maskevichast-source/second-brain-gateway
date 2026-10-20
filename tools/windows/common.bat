@@ -24,6 +24,8 @@ if not "%VAULT%"=="" goto :vault_given
 echo Введите полный путь к папке SecondBrain, например C:\Users\Вы\iCloudDrive\SecondBrain
 set /p VAULT=Путь: 
 :vault_given
+set VAULT=%VAULT:"=%
+if "%VAULT:~-1%"=="\" set "VAULT=%VAULT:~0,-1%"
 if exist "%VAULT%\" goto :vault_ok
 echo Папка не найдена: %VAULT%
 pause
