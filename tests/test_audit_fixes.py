@@ -122,3 +122,11 @@ def test_unresolved_close_leaves_a_visible_note(tmp_path):
     vault_sync.report_unresolved(tmp_path, item, "ambiguous", set())
     files = list((tmp_path / "0-Inbox").glob("Не-применено-*.md"))
     assert len(files) == 1 and "Позвонить в банк" in files[0].read_text(encoding="utf-8")
+
+
+def test_budget_text_says_same_days_while_month_is_running():
+    from app import ada
+    data = {"currency": "KZT", "month_label": "Октябрь 2026", "day": 21, "days_in_month": 31, "income": 100, "expense": 50,
+            "balance": 50, "prev_expense": 90, "expense_delta_pct": -44.4}
+    assert "за те же дни прошлого месяца" in ada.format_summary(data)
+    assert "в прошлом месяце" in ada.format_summary({**data, "day": 31})

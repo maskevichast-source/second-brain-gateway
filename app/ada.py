@@ -73,7 +73,10 @@ def format_summary(data: dict) -> str:
     delta = _num(data.get("expense_delta_pct"))
     if delta is not None and _num(data.get("prev_expense")) is not None:
         word = "больше" if delta > 0 else "меньше"
-        lines.append(f"• расходы на {abs(round(delta))}% {word}, чем в прошлом месяце ({money(data['prev_expense'], cur)})")
+        day, total = _num(data.get("day")), _num(data.get("days_in_month"))
+        same_days = day is not None and total is not None and day < total      # месяц ещё идёт: Ада сравнивает те же дни
+        period = "за те же дни прошлого месяца" if same_days else "в прошлом месяце"
+        lines.append(f"• расходы на {abs(round(delta))}% {word}, чем {period} ({money(data['prev_expense'], cur)})")
     cats = [c for c in (data.get("top_categories") or []) if isinstance(c, dict)][:6]
     if cats:
         rows = []
