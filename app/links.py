@@ -55,10 +55,7 @@ def is_public_ip(address: str) -> bool:
         return False
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
-    return not (
-        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
-        or ip.is_reserved or ip.is_unspecified
-    )
+    return ip.is_global and not (ip.is_multicast or ip.is_reserved or ip.is_unspecified)   # is_global отсекает и 100.64.0.0/10
 
 
 async def is_safe_url(url: str, resolver: Resolver) -> bool:
@@ -143,6 +140,16 @@ async def _fetch_youtube(url: str, client: httpx.AsyncClient, timeout: float) ->
     return info
 
 
+def _connected_to_public_ip(response) -> bool:
+    """После соединения сверяем реальный IP сервера: DNS мог ответить публичным адресом при проверке и внутренним при подключении."""
+    try:
+        stream = response.extensions.get("network_stream")
+        addr = stream.get_extra_info("server_addr") if stream is not None else None
+    except Exception:  # noqa: BLE001 - нет данных о соединении (тестовый транспорт): проверка по DNS уже пройдена
+        return True
+    return True if not addr else is_public_ip(str(addr[0]))
+
+
 async def _fetch_page(url: str, client: httpx.AsyncClient, settings: Settings, resolver: Resolver) -> LinkInfo:
     info = LinkInfo(url=url, domain=_domain(url))
     current = url
@@ -154,6 +161,8 @@ async def _fetch_page(url: str, client: httpx.AsyncClient, settings: Settings, r
                 "GET", current, headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
                 timeout=settings.link_timeout, follow_redirects=False,
             ) as response:
+                if not _connected_to_public_ip(response):
+                    return info                       # защита от DNS-rebinding: адрес, к которому реально подключились
                 if response.status_code in (301, 302, 303, 307, 308):
                     location = response.headers.get("location")
                     if not location:

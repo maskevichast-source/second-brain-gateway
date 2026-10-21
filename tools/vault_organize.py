@@ -85,7 +85,7 @@ def _unquote(value: str) -> str:
 def split_front(text: str):
     """(строки свойств, номер закрывающей ---, все строки с переводами строк) или None."""
     lines = text.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
+    if not lines or lines[0].lstrip("\ufeff").strip() != "---":      # BOM из Блокнота не должен выбрасывать заметку
         return None
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":
@@ -406,12 +406,13 @@ def organize(vault: Path, dry_run: bool = False, refresh_all: bool = False, now:
                 report["linked"].append(f"{note.title}: {len(found)}")
                 text = new_text
         target_dir = None
+        mark_filed = False
         if in_inbox:
             if should_file(note):
                 dest = destination(note, folders)
                 if dest:
                     target_dir = vault / Path(dest)
-                    text = set_property(text, "stage", "filed")
+                    mark_filed = True               # stage: filed ставим уже ПОСЛЕ успешного переноса
             else:
                 report["kept"].append(note.title)
         elif ours and note.type in ARCHIVE_TYPES and norm(str(note.front.get("status"))) in CLOSED:
@@ -423,12 +424,17 @@ def organize(vault: Path, dry_run: bool = False, refresh_all: bool = False, now:
                     f"{note.title} -> {target_dir.relative_to(vault)}")
             continue
         try:
+            if note.path.stat().st_mtime != note.mtime:
+                report.setdefault("errors", []).append(f"{note.title}: изменена во время обработки, пропускаю")
+                continue                            # правка в Obsidian между чтением и записью не должна потеряться
             if text != note.text:
                 _atomic_write(note.path, text)
             if target_dir:
                 target_dir.mkdir(parents=True, exist_ok=True)
                 new_path = _free_path(target_dir, note.path.name)
                 os.replace(note.path, new_path)
+                if mark_filed:
+                    _atomic_write(new_path, set_property(text, "stage", "filed"))
                 report["archived" if note.stage == "filed" else "filed"].append(
                     f"{note.title} -> {new_path.parent.relative_to(vault)}")
         except OSError as exc:

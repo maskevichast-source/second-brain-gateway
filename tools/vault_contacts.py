@@ -24,13 +24,33 @@ import vault_people as vp
 def unfold(text: str) -> list[str]:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\n[ \t]", "", text)            # продолжение строки в vCard начинается с пробела
-    return text.split("\n")
+    lines = text.split("\n")
+    out: list[str] = []
+    for line in lines:                              # QUOTED-PRINTABLE: мягкий перенос — «=» в конце строки
+        if out and out[-1].endswith("=") and "QUOTED-PRINTABLE" in out[-1].upper():
+            out[-1] = out[-1][:-1] + line
+        else:
+            out.append(line)
+    return out
 
 
 def unescape(value: str) -> str:
-    for old, new in (("\\n", " "), ("\\N", " "), ("\\,", ","), ("\\;", ";"), ("\\\\", "\\")):
-        value = value.replace(old, new)
-    return value.strip()
+    """Снимает экранирование vCard за один проход: «\\\\n» остаётся обратным слэшем и буквой n, а не переводом строки."""
+    table = {"n": " ", "N": " ", ",": ",", ";": ";", "\\": "\\"}
+    return re.sub(r"\\(.)", lambda m: table.get(m.group(1), m.group(0)), value).strip()
+
+
+def _decode_qp(head: str, value: str) -> str:
+    """vCard 2.1: ENCODING=QUOTED-PRINTABLE;CHARSET=WINDOWS-1251 → обычный текст."""
+    import quopri
+    charset = re.search(r"CHARSET=([\w-]+)", head, re.I)
+    raw = quopri.decodestring(value.encode("latin-1", "ignore"))
+    for enc in ([charset.group(1)] if charset else []) + ["utf-8", "cp1251"]:
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "replace")
 
 
 def parse_vcards(text: str) -> list[dict[str, list[str]]]:
@@ -46,6 +66,7 @@ def parse_vcards(text: str) -> list[dict[str, list[str]]]:
         elif current is not None and ":" in line:
             head, value = line.split(":", 1)
             name = head.split(";")[0].split(".")[-1].upper()      # «item1.TEL;type=CELL» -> TEL
+            value = _decode_qp(head, value) if "QUOTED-PRINTABLE" in head.upper() else value
             value = unescape(value)
             if value:
                 current.setdefault(name, []).append(value)
@@ -138,36 +159,66 @@ def is_recent(card: dict[str, list[str]], name: str, since: datetime | None, tg:
     return bool(mine) and any(mine <= chat or (chat <= mine and len(chat) > 1) for chat in tg)
 
 
+def _phone_digits(facts: dict[str, list[str]]) -> set[str]:
+    return {d for d in (re.sub(r"\D", "", p)[-10:] for p in facts.get("phones", [])) if d}
+
+
+def _distinct_name(name: str, digits: set[str], seen: dict[str, set[str]], folder: Path) -> str | None:
+    """Тёзки с разными телефонами получают разные карточки («Айдар», «Айдар (2)»); повтор того же человека — None."""
+    candidate, n = name, 1
+    while True:
+        known = set(seen.get(candidate, set()))
+        path = folder / f"{candidate}.md"
+        if path.exists():
+            try:
+                front = vp.parse_front(vp.split_front(path.read_text(encoding="utf-8"))[0])
+                known |= {d for d in (re.sub(r"\D", "", p)[-10:] for p in vp.as_list(front.get("phones"))) if d}
+            except (OSError, UnicodeDecodeError, TypeError):
+                pass
+        if candidate not in seen and not path.exists():
+            return candidate
+        if not known or not digits or known & digits:
+            return None if candidate in seen else candidate     # те же телефоны (или нечем различить): тот же человек
+        n += 1
+        candidate = f"{name} ({n})"
+
+
 def run(vcf: Path, vault: Path, dry_run: bool = False, now: datetime | None = None,
         since: datetime | None = None, tg: list[frozenset[str]] | None = None) -> dict[str, list[str]]:
     now = now or datetime.now()
     tg = tg or []
     report = {"created": [], "updated": [], "skipped": 0}
     folder = vault / vp.PEOPLE_DIR
-    seen = set()
-    for card in parse_vcards(vcf.read_text(encoding="utf-8-sig", errors="replace")):
+    seen: dict[str, set[str]] = {}               # имя -> цифры телефонов уже обработанных контактов
+    try:
+        raw_text = vcf.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        raw_text = vcf.read_text(encoding="cp1251", errors="replace")
+    for card in parse_vcards(raw_text):
         parsed = card_to_facts(card)
         if not parsed:
             continue
         name, facts = parsed
-        if name in seen:
-            continue
         if not is_recent(card, name, since, tg):
             report["skipped"] += 1
             continue
-        seen.add(name)
+        digits = _phone_digits(facts)
+        name = _distinct_name(name, digits, seen, folder)
+        if name is None:
+            continue                              # тот же человек второй раз в файле
+        seen.setdefault(name, set()).update(digits)
         path = folder / f"{name}.md"
         if path.exists():
             new_text, changed = vp.merge_into_card(path.read_text(encoding="utf-8"), facts)
             if changed:
                 report["updated"].append(f"{name}: {', '.join(changed)}")
                 if not dry_run:
-                    path.write_text(new_text, encoding="utf-8")
+                    vp._write(path, new_text)
         else:
             report["created"].append(name)
             if not dry_run:
                 folder.mkdir(parents=True, exist_ok=True)
-                path.write_text(vp.new_card(name, facts, now), encoding="utf-8")
+                vp._write(path, vp.new_card(name, facts, now))
     return report
 
 

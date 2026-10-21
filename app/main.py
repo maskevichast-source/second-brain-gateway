@@ -435,7 +435,9 @@ def create_app(
                 ids = [ids]            # шорткату проще прислать одно значение, чем список
             if not isinstance(ids, list):
                 raise ValueError
-            ids = [int(i) for i in ids]
+            if len(ids) > 5000:
+                return _error(422, "Слишком много номеров за один раз (максимум 5000).")
+            ids = [int(i) for i in ids if -2**62 < int(i) < 2**62]
         except (ValueError, TypeError, AttributeError):
             return _error(422, "Тело запроса: {\"ids\": [1, 2, 3]}")
         return {"status": "success", "removed": db.ack(ids)}

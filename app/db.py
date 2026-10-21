@@ -317,25 +317,34 @@ class Database:
 
     # ---------- срез хранилища (короткие свойства заметок, без текстов) ----------
 
-    def snapshot_put(self, rows: list[tuple[str, dict]], max_rows: int = 20000) -> None:
+    @staticmethod
+    def _snapshot_write(conn, rows: list[tuple[str, dict]], max_rows: int) -> None:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for key, front in rows:
+            conn.execute("INSERT OR REPLACE INTO snapshot (key, front, updated_at) VALUES (?, ?, ?)",
+                         (key, json.dumps(front, ensure_ascii=False), now))
+        conn.execute(
+            "DELETE FROM snapshot WHERE key IN (SELECT key FROM snapshot ORDER BY updated_at DESC, key DESC LIMIT -1 OFFSET ?)",
+            (max_rows,))
+
+    def snapshot_put(self, rows: list[tuple[str, dict]], max_rows: int = 20000) -> None:
         with closing(self._connect()) as conn:
-            for key, front in rows:
-                conn.execute("INSERT OR REPLACE INTO snapshot (key, front, updated_at) VALUES (?, ?, ?)",
-                             (key, json.dumps(front, ensure_ascii=False), now))
-            conn.execute(
-                "DELETE FROM snapshot WHERE key IN (SELECT key FROM snapshot ORDER BY updated_at DESC LIMIT -1 OFFSET ?)",
-                (max_rows,))
+            self._snapshot_write(conn, rows, max_rows)
             conn.commit()
 
     def snapshot_replace(self, rows: list[tuple[str, dict]], max_rows: int = 20000) -> None:
+        """Полная замена среза одной транзакцией: при сбое посередине остаётся прежний срез, а не пустой."""
         with closing(self._connect()) as conn:
-            conn.execute("DELETE FROM snapshot")
-            conn.execute(
-                "INSERT OR REPLACE INTO profile (key, value, updated_at) VALUES ('snapshot_synced', ?, ?)",
-                ("1", datetime.now(timezone.utc).isoformat(timespec="seconds")))
-            conn.commit()
-        self.snapshot_put(rows[:max_rows], max_rows)
+            try:
+                conn.execute("DELETE FROM snapshot")
+                conn.execute(
+                    "INSERT OR REPLACE INTO profile (key, value, updated_at) VALUES ('snapshot_synced', ?, ?)",
+                    ("1", datetime.now(timezone.utc).isoformat(timespec="seconds")))
+                self._snapshot_write(conn, rows[:max_rows], max_rows)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def snapshot_fronts(self) -> list[dict]:
         with closing(self._connect()) as conn:
@@ -368,6 +377,7 @@ class Database:
         with closing(self._connect()) as conn:
             count = conn.execute("DELETE FROM snapshot").rowcount
             conn.execute("DELETE FROM profile WHERE key = 'snapshot_synced'")
+            conn.execute("DELETE FROM responses")          # кэш ответов на 24 часа тоже содержит тексты записей
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("VACUUM")
@@ -442,6 +452,7 @@ class Database:
         with closing(self._connect()) as conn:
             conn.execute("DELETE FROM profile WHERE key IN ('context', 'facts')")
             conn.execute("DELETE FROM known_people")
+            conn.execute("DELETE FROM responses")          # в кэшированных ответах встречаются имена людей
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("VACUUM")

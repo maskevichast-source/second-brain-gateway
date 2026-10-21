@@ -76,13 +76,23 @@ def safe_part(name: str) -> str:
     return name or "zametka.md"
 
 
-def write_note(vault: Path, folder: str, filename: str, markdown: str) -> Path | None:
+def index_names(vault: Path) -> set[str]:
+    """Имена всех .md в хранилище (после раскладки заметка лежит уже не в 0-Inbox): чтобы не записать её второй раз."""
+    try:
+        return {p.name for p in vault.rglob("*.md")}
+    except OSError:
+        return set()
+
+
+def write_note(vault: Path, folder: str, filename: str, markdown: str, known: set[str] | None = None) -> Path | None:
     """Пишет файл, не затирая существующий. Возвращает путь или None, если такой же уже лежит."""
     target_dir = vault / safe_part(folder or "0-Inbox")
     target_dir.mkdir(parents=True, exist_ok=True)
     name = safe_part(filename)
     stem, suffix = (name[:-3], ".md") if name.lower().endswith(".md") else (name, ".md")
     path = target_dir / f"{stem}{suffix}"
+    if known is not None and path.name in known and not path.exists():
+        return None                          # заметка уже была выгружена и разложена по папкам (/requeue, повтор после сбоя ack)
     counter = 2
     while path.exists():
         if path.read_text(encoding="utf-8") == markdown:
@@ -90,6 +100,8 @@ def write_note(vault: Path, folder: str, filename: str, markdown: str) -> Path |
         path = target_dir / f"{stem}-{counter}{suffix}"
         counter += 1
     path.write_text(markdown, encoding="utf-8", newline="\n")
+    if known is not None:
+        known.add(path.name)
     return path
 
 
@@ -307,8 +319,8 @@ def build_snapshot_corpus(vault: Path) -> str:
         if not parsed or not head.startswith("---"):
             continue
         lines, end = parsed
-        if "".join(lines[1:end]).lower().find("private: true") != -1:
-            continue
+        if any(re.match(r"^\s*private:\s*[\"']?(true|yes|1|да)[\"']?\s*(#.*)?$", row, re.I) for row in lines[1:end]):
+            continue                            # private: true, "true", yes, да: любая запись приватности
         parts.append("".join(strip_private_keys(lines[: end + 1])).replace("\r\n", "\n"))
     corpus = "\n=====NOTE=====\n".join(parts)
     return corpus if len(corpus) <= SNAPSHOT_MAX_CHARS else ""
@@ -379,8 +391,28 @@ def organize_after_sync(vault: Path, fresh: bool = False) -> None:
         print(f"Карточки людей не обновились: {type(exc).__name__}")
 
 
+def report_unresolved(vault: Path, item: dict, result: str, known: set[str] | None = None) -> None:
+    """Действие из Telegram не применилось (не найдено или подходит несколько заметок): не теряем молча,
+    а оставляем заметку в 0-Inbox, чтобы человек увидел это в Obsidian."""
+    try:
+        payload = json.loads(item.get("markdown") or "{}")
+    except ValueError:
+        payload = {}
+    title = str(payload.get("title") or "?")
+    action = "закрыть дело" if payload.get("action") == "close" else "изменить срок дела"
+    reason = "не найдено ни одной заметки с таким названием" if result == "not_found" else "подходит несколько заметок с таким названием"
+    seed = f"{item.get('id')}-{title}-{payload.get('created')}"
+    name = f"Не-применено-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:8]}.md"
+    body = ("---\nschema: 1\ntype: note\n" f"title: {json.dumps('Не применено из Telegram: ' + title, ensure_ascii=False)}\n"
+            "status: \"не-разобрано\"\n---\n\n"
+            f"Из Telegram пришло действие «{action}» для дела «{title}», но {reason}. "
+            "Найди дело в Obsidian и поменяй вручную (статус или срок).\n")
+    write_note(vault, "0-Inbox", name, body, known)
+
+
 def sync_once(url: str, token: str, vault: Path) -> int:
     saved = 0
+    known = index_names(vault)
     while True:
         batch = api(url, token, "/pending?limit=50&service=1")
         items = batch.get("items", [])
@@ -408,10 +440,12 @@ def sync_once(url: str, token: str, vault: Path) -> int:
                 continue
             if item.get("kind", "note") != "note":
                 result = apply_service(vault, item)
+                if result in ("not_found", "ambiguous"):
+                    report_unresolved(vault, item, result, known)
                 print(f"  ~ {(json.loads(item['markdown']).get('title') if result != 'invalid' else '?')}: {SERVICE_RU[result]}")
                 done.append(item["id"])
                 continue
-            path = write_note(vault, item.get("folder", ""), item["filename"], item["markdown"])
+            path = write_note(vault, item.get("folder", ""), item["filename"], item["markdown"], known)
             if path:
                 saved += 1
                 print(f"  + {path.relative_to(vault)}")

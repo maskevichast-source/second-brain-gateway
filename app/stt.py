@@ -74,11 +74,7 @@ async def transcribe(settings: Settings, file_id: str, http_client: httpx.AsyncC
         text = str(response.json().get("text", "")).strip()
         return text or None
     except httpx.HTTPStatusError as exc:
-        logger.warning(
-            "stt: ошибка API %s: %s",
-            exc.response.status_code,
-            exc.response.text[:300]
-        )
+        logger.warning("stt: ошибка API %s", exc.response.status_code)     # тело ответа не логируем: может содержать фрагменты запроса
         monitor.failure("stt", exc)
         return None
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:

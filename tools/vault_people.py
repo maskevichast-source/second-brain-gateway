@@ -102,6 +102,18 @@ def _is_json(value: str) -> bool:
         return False
 
 
+def _strip_comment(raw: str) -> str:
+    """Отрезает « # комментарий» в конце значения, но не трогает «#» внутри строки в кавычках («Вопрос #2»)."""
+    raw = raw.strip()
+    if raw[:1] in ('"', "'"):
+        end = raw.find(raw[0], 1)
+        while end != -1 and raw[end - 1] == "\\" and raw[0] == '"':
+            end = raw.find(raw[0], end + 1)
+        if end != -1:
+            return raw[:end + 1] + raw[end + 1:].split(" #")[0].rstrip()
+    return raw.split(" #")[0].strip()
+
+
 def parse_front(lines: list[str]) -> dict[str, object]:
     data: dict[str, object] = {}
     key = None
@@ -113,7 +125,7 @@ def parse_front(lines: list[str]) -> dict[str, object]:
         m = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", line)
         if not m:
             continue
-        key, raw = m.group(1), m.group(2).split(" #")[0].strip()
+        key, raw = m.group(1), _strip_comment(m.group(2))
         if raw == "":
             data[key] = []                      # возможно, дальше пойдёт блок списка
         elif raw.startswith("[") and raw.endswith("]"):
@@ -138,7 +150,10 @@ def unlink(text: str) -> str:
 
 def safe_name(name: str) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|#^\[\]]', " ", name)
-    return re.sub(r"\s+", " ", cleaned).strip(" .")[:80]
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")[:80]
+    if re.fullmatch(r"(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?", cleaned):
+        cleaned += "_"                          # зарезервированные имена Windows
+    return cleaned
 
 
 def q(value: str) -> str:
@@ -146,6 +161,13 @@ def q(value: str) -> str:
 
 
 # ---------- обход хранилища ----------
+
+def _is_private(front: dict) -> bool:
+    value = front.get("private")
+    if isinstance(value, list):
+        return False
+    return str(value or "").strip().strip("\"'").lower() in {"true", "yes", "1", "да"}
+
 
 def read_notes(vault: Path):
     for path in sorted(vault.rglob("*.md")):
@@ -157,7 +179,10 @@ def read_notes(vault: Path):
         except (OSError, UnicodeDecodeError):
             continue
         if parts:
-            yield path, parse_front(parts[0])
+            front = parse_front(parts[0])
+            if _is_private(front):
+                continue                        # приватные заметки не дают карточек людей и не уходят в профиль
+            yield path, front
 
 
 def collect(vault: Path):
@@ -286,14 +311,14 @@ def run(vault: Path, dry_run: bool = False, now: datetime | None = None) -> dict
             if changed:
                 report["updated"].append(f"{name}: {', '.join(changed)}")
                 if not dry_run:
-                    path.write_text(new_text, encoding="utf-8")
+                    _write(path, new_text)
         elif name in existing:
             continue      # карточка лежит в другой папке, второй не заводим
         else:
             report["created"].append(name)
             if not dry_run:
                 folder.mkdir(parents=True, exist_ok=True)
-                path.write_text(new_card(name, fact, now), encoding="utf-8")
+                _write(path, new_card(name, fact, now))
     return report
 
 
@@ -338,6 +363,13 @@ def _set_title(text: str, name: str) -> str:
     return "---\n" + "\n".join(front_lines) + "\n---\n" + body
 
 
+def _write(path: Path, text: str) -> None:
+    """Запись через временный файл: при сбое не остаётся обрезанной карточки; окончания строк всегда LF."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    os.replace(tmp, path)
+
+
 def _unique(folder: Path, name: str) -> Path:
     path, n = folder / name, 2
     while path.exists():
@@ -346,12 +378,28 @@ def _unique(folder: Path, name: str) -> Path:
     return path
 
 
+def _homonyms(entries: list[dict]) -> bool:
+    """Тёзки: у двух карточек группы заполнены телефоны, день рождения или компания, и они не совпадают."""
+    for key in ("phones", "birthday", "company"):
+        sets = []
+        for e in entries:
+            values = {re.sub(r"\D", "", v) if key == "phones" else _norm_name(v) for v in as_list(e["front"].get(key))}
+            values.discard("")
+            if values:
+                sets.append(values)
+        for i, a in enumerate(sets):
+            for b in sets[i + 1:]:
+                if not a & b:
+                    return True
+    return False
+
+
 def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
     """Склеивает «Имя» и «Имя — описание» в одну карточку. Дубли не удаляются, а уезжают в 3-Архив/Люди-дубли.
 
     Без apply только описывает, что будет сделано. Похожие, но не совпадающие имена (опечатки) только перечисляются.
     """
-    report = {"merged": [], "renamed": [], "moved": [], "similar": [], "foreign": []}
+    report = {"merged": [], "renamed": [], "moved": [], "similar": [], "foreign": [], "homonyms": []}
     folder = vault / PEOPLE_DIR
     if not folder.is_dir():
         return report
@@ -379,6 +427,9 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
     for entries in groups.values():
         if len(entries) == 1 and not entries[0]["desc"] and entries[0]["plain"]:
             continue
+        if len(entries) > 1 and _homonyms(entries):
+            report["homonyms"].append(", ".join(e["path"].stem for e in entries))
+            continue                                         # разные телефоны, день рождения или компания: это разные люди
         primary = next((e for e in entries if e["plain"]), None) or next((e for e in entries if not e["desc"]), None)
         rest = [e for e in entries if e is not primary]
         target_name = (primary or entries[0])["name"]
@@ -401,9 +452,9 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
             report["merged"].append(f"{dup['path'].stem} -> {target_name}")
         if apply:
             target = folder / f"{target_name}.md"
-            if primary.get("rename") and target.exists() and target != primary["path"]:
-                target = _unique(folder, f"{target_name}.md")
-            target.write_text(text, encoding="utf-8", newline="\n")
+            if target.exists() and target != primary["path"] and all(target != d["path"] for d in rest):
+                target = _unique(folder, f"{target_name}.md")      # не затираем чужой файл с таким именем
+            _write(target, text)
             if primary["path"] != target:
                 primary["path"].unlink()
             archive = vault / Path(DUP_DIR)
@@ -490,7 +541,7 @@ def main(argv=None) -> int:
     if args.tidy:
         plan = tidy(vault, apply=args.apply)
         print(("Сделано:" if args.apply else "План (ничего не изменено, добавь --apply):"))
-        for key, title in (("merged", "склеено"), ("renamed", "переименовано"), ("similar", "похожие имена, проверь руками"),
+        for key, title in (("merged", "склеено"), ("renamed", "переименовано"), ("similar", "похожие имена, проверь руками"), ("homonyms", "тёзки (разные телефоны/компания), не склеены"),
                            ("foreign", "не карточка человека, лежит в 1-Люди")):
             for row in plan[key]:
                 print(f"  {title}: {row}")

@@ -195,7 +195,8 @@ async def handle_update(
         reply = await _answer(message, chat_id, update_id, settings=settings, db=db, process=process,
                               secretary=secretary, clock=clock, transcriber=transcriber, backup_sender=backup_sender,
                               file_fetcher=file_fetcher, vision=vision)
-        if dedupe_key and reply:
+        no_cache = bool(reply) and bool(reply.pop("_no_cache", False))    # приватный голос: эхо расшифровки не кэшируем
+        if dedupe_key and reply and not no_cache:
             db.save(capture_id=dedupe_key, revision=1, response=reply)
         return reply
 
@@ -326,7 +327,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return await _diary_command(chat_id, update_id, text, settings, db, process, now)
     if command == "/forget":
         removed = db.snapshot_clear()
-        return _reply(chat_id, f"Стёр срез хранилища на сервере ({removed} записей). Новые записи снова попадут в него; "
+        return _reply(chat_id, f"Стёр срез хранилища на сервере ({removed} записей) и кэш последних ответов. Новые записи снова попадут в него; "
                                "полную копию вернёт шорткат «Синхронизировать».")
     if command == "/sync":
         count, synced = db.snapshot_info()
@@ -627,7 +628,10 @@ async def _answer_core(message: dict, chat_id: int, update_id, *, settings: Sett
     shown = one_line(transcript, 2500)
     echo = f"🎙 «{shown}»" + ("… (в заметку записано целиком)" if len(transcript) > len(shown) else "") + "\n\n"
     body = str(reply.get("text", ""))
-    return {**reply, "text": (echo + body)[:4000] if len(echo) + len(body) <= 4000 else (echo[:1800] + "\n\n" + body)[:4000]}
+    result = {**reply, "text": (echo + body)[:4000] if len(echo) + len(body) <= 4000 else (echo[:1800] + "\n\n" + body)[:4000]}
+    if split_private(transcript)[0]:
+        result["_no_cache"] = True
+    return result
 
 
 # ---------- новый человек ----------

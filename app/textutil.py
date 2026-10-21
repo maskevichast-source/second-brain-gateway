@@ -13,7 +13,7 @@ _URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 _URL_FIND_RE = re.compile(r"https?://[^\s<>\"'\)\]]+", re.IGNORECASE)
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _LEADING_YAML_RE = re.compile(r"\A\s*---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
-_PRIVATE_RE = re.compile(r"^\s*(?:!+|секрет\s*[:;,.\-—])\s*", re.IGNORECASE)
+_PRIVATE_RE = re.compile(r"^[\s\u200b-\u200f\u2060\ufeff]*(?:!+|секрет\s*[:;,.\-—])\s*", re.IGNORECASE)   # невидимые символы перед «!» не отключают приватность
 _WIKI_BAD_RE = re.compile(r"[\[\]|#^\\/:*?\"<>]")
 
 
