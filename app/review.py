@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 
 from .ask import build_digest, collect_items, fmt_date, repeat_days
+from . import owner as owner_module
 from .schema import TYPES
 from .textutil import one_line, parse_date
 from .vault import VaultNote, as_list, strip_original
@@ -48,7 +49,7 @@ def build_week_review(notes: list[VaultNote], now: datetime, ada_text: str = "")
 
     stale = []
     for n in notes:
-        if n.type != "person" or str(n.get("status")) == "неактуален":
+        if n.type != "person" or str(n.get("status")) == "неактуален" or owner_module.is_owner(n.title):
             continue
         raw = parse_date(n.get("last_contact"))
         if raw and (today - date.fromisoformat(raw)).days > STALE_CONTACT_DAYS:
@@ -216,7 +217,7 @@ def build_radar(notes: list[VaultNote], today: date, limit: int = 10) -> str:
             if day and (name.lower() not in last or day > last[name.lower()]):
                 last[name.lower()] = day
     rows = []
-    for card in (n for n in notes if n.type == "person"):
+    for card in (n for n in notes if n.type == "person" and not owner_module.is_owner(n.title)):
         orbit = str(card.get("orbit")).strip()
         try:
             cadence = int(float(str(card.get("cadence_days")))) if str(card.get("cadence_days")).strip() else ORBIT_DAYS.get(orbit)

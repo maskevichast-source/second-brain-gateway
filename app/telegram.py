@@ -18,6 +18,7 @@ from typing import Awaitable, Callable
 
 from . import actions as actions_module
 from . import contacts_review
+from . import owner as owner_module
 from . import diary, interview
 from . import when as when_module
 from . import sources as sources_module
@@ -39,6 +40,7 @@ HELP = (
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
     "/who Имя (или /brief) — что знать перед встречей, /promises — кто что кому обещал, /radar — с кем давно не общались, /budget — бюджет из «Ады».\n"
     "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
+    "• /me Имя Фамилия, Псевдоним — скажи, кто ты: карточки на твоё имя (в любом порядке слов) я не буду спрашивать и считать «давно не общались».\n"
     "• /contacts — переберём карточки людей без данных: ответь, кто это, или убери ненужный контакт в архив (не удаляется навсегда).\n"
     "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
     "• /fact текст — короткий факт для меня, например «Собаку зовут Янка» (имена, клички, места): учту в записях и в расшифровке голосовых.\n"
@@ -186,6 +188,8 @@ async def handle_update(
                                "Впиши его в переменную TELEGRAM_ALLOWED_USER_IDS на Railway.")
     if user_id not in allowed:
         return None
+    owner_module.load(db)
+    owner_module.learn_from_telegram(db, message.get("from") or {})
 
     update_id = update.get("update_id")
     dedupe_key = f"tgu-{update_id}" if isinstance(update_id, int) else None
@@ -384,6 +388,17 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return await _backup_command(chat_id, db, now, backup_sender)
     if command == "/status":
         return _reply(chat_id, _status_text(db))
+    if command == "/me":
+        rest = text[len(text.split()[0]):].strip()
+        if not rest:
+            current = owner_module.describe()
+            return _reply(chat_id, (f"Я знаю, что ты: {current}. Любой порядок слов («Маскевич Владислав») считаю тобой, "
+                                    "карточки на твоё имя не спрашиваю и в радар не ставлю. Поменять: /me Имя Фамилия, Псевдоним"
+                                    if current else
+                                    "Не знаю, как тебя зовут. Напиши: /me Владислав Маскевич, Влад (после запятой псевдонимы)."))
+        names = [part.strip() for part in rest.split(",") if part.strip()]
+        owner_module.save(db, names)
+        return _reply(chat_id, f"Запомнил: ты — {owner_module.describe()}. Теперь карточки на эти имена считаю твоими.")
     if command in ("/contacts", "/контакты"):
         return _contacts_start(chat_id, db)
     if command == "/people":
@@ -1057,6 +1072,7 @@ def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict |
     user_id = (callback.get("from") or {}).get("id")
     if user_id not in settings.telegram_allowed_ids:
         return None
+    owner_module.load(db)
     data = str(callback.get("data") or "")
     action, _, rest = data.partition(":")
     key, _, extra = rest.partition(":")

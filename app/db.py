@@ -434,6 +434,14 @@ class Database:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT value FROM profile WHERE key = 'context'").fetchone()
         base = row["value"] if row else ""
+        try:
+            names = [str(n) for n in json.loads(self.get_setting("owner_names", "") or "[]")]
+        except ValueError:
+            names = []
+        if names:
+            base = (f"Владелец бота и автор записей: {', '.join(names)}. Это «я» в записях, имя может стоять в любом порядке "
+                    "(«Маскевич Владислав»). Карточку человека для владельца не создавай и про него как про нового знакомого не спрашивай.\n"
+                    + base).strip()
         facts = self.get_facts()
         return (base + "\n" + "\n".join(f"- {f}" for f in facts)).strip() if facts else base
 

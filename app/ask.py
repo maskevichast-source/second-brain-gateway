@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from . import monitor
+from . import monitor, owner as owner_module
 from .config import Settings
 from .llm import WEEKDAYS, _neutralize
 from .textutil import one_line, parse_date
@@ -175,7 +175,7 @@ def collect_items(notes: list[VaultNote], today: date) -> list[Item]:
                 extra = ("ждёт ответа" + (f": {extra}" if extra else ""))
             items.append(Item(day, rule.label, note.title, extra, key=str(note.front.get("_key") or "") if (note.type, rule.field) in ACTIONABLE else "",
                               field=rule.field))
-        if note.type == "person" and note.get("birthday") and _base_name(note.title) not in owners:
+        if note.type == "person" and note.get("birthday") and _base_name(note.title) not in owners and not owner_module.is_owner(note.title):
             found = _next_birthday(note.get("birthday"), today)
             if found and (found[0] - today).days <= 14:
                 age = f", исполнится {found[1]}" if found[1] else ""

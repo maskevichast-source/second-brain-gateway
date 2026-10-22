@@ -15,6 +15,7 @@ from .frontmatter import Raw, dump
 from .links import LinkInfo
 from .llm import LLMNote, LLMResult
 from .schema import Field
+from . import owner as owner_module
 from . import people as people_module
 from . import reminders as reminders_module
 from .textutil import (
@@ -331,7 +332,7 @@ def build_response(
         names = [people_module.canonical(n, index) for n in raw.people]
         raw_notes[i] = raw.model_copy(update={"people": names})
         for name in names:
-            if people_module.is_new(name, index) and name not in new_people:
+            if people_module.is_new(name, index) and name not in new_people and not owner_module.is_owner(name):
                 new_people.append(name)
 
     overflow = len(raw_notes) > max_notes

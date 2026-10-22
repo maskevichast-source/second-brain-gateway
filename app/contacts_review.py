@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from . import owner as owner_module
 from .textutil import one_line
 from .vault import as_list
 
@@ -22,7 +23,7 @@ def _val(front: dict, key: str) -> str:
 
 def needs_info(front: dict) -> bool:
     """Карточка без ответа на главный вопрос «кто это»."""
-    if front.get("type") != "person" or _val(front, "status") == "неактуален":
+    if front.get("type") != "person" or _val(front, "status") == "неактуален" or owner_module.is_owner(str(front.get("title", ""))):
         return False
     return not (_val(front, "relation") or _val(front, "relation_group") or _val(front, "how_met"))
 

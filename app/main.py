@@ -203,6 +203,7 @@ def create_app(
         while True:
             try:
                 await webhook_module.ensure_webhook(settings)
+                await webhook_module.ensure_commands(settings)
             except Exception as exc:  # noqa: BLE001 - сторож не должен падать
                 logger.warning("webhook guard: %s", type(exc).__name__)
             await asyncio.sleep(3600)
@@ -221,7 +222,7 @@ def create_app(
     async def lifespan(_app):
         task = None
         waiter = asyncio.create_task(waiting_guard()) if settings.telegram_allowed_ids else None
-        guard = asyncio.create_task(webhook_guard()) if webhook_module.configured(settings) else None
+        guard = asyncio.create_task(webhook_guard()) if (webhook_module.configured(settings) or settings.telegram_bot_token) else None
         if settings.telegram_bot_token and settings.telegram_allowed_ids:
             task = asyncio.create_task(scheduler_module.run_loop(
                 db, settings, clock, scheduler_module.telegram_sender(settings)))

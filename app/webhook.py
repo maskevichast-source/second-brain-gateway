@@ -20,6 +20,46 @@ PATH = "/telegram/webhook"
 ALLOWED = ["message", "callback_query"]
 
 
+COMMANDS = [
+    ("ask", "Спросить по моим заметкам"), ("day", "Сводка дня"), ("tasks", "Дела и сроки"),
+    ("week", "Обзор недели"), ("who", "Что знать перед встречей с человеком"), ("brief", "Брифинг по человеку"),
+    ("promises", "Кто что кому обещал"), ("radar", "С кем давно не общались"), ("budget", "Бюджет из Ады"),
+    ("health", "Проверка базы"), ("remember", "Вспомнить старые идеи"), ("merge", "Дубли карточек"),
+    ("contacts", "Разобрать карточки людей"), ("people", "Кого я знаю"), ("diary", "Вечерний дневник"),
+    ("interview", "Интервью о себе"), ("fact", "Запомнить короткий факт"), ("me", "Кто я (имя владельца)"),
+    ("push", "Что я присылаю сам"), ("done", "Дело сделано"), ("cancel", "Отменить дело"),
+    ("snooze", "Отложить дело"), ("skip", "Сохранить как есть"), ("stop", "Остановить диалог"),
+    ("import", "Импорт"), ("sync", "Состояние среза"), ("status", "Состояние сервиса"),
+    ("backup", "Резервная копия"), ("requeue", "Вернуть заметки в очередь"), ("forget", "Стереть срез на сервере"),
+    ("help", "Все возможности"),
+]
+
+
+async def ensure_commands(settings: Settings, client: httpx.AsyncClient | None = None) -> str:
+    """Меню команд по «/» в чате: ставится при старте и раз в час. 'ok' | 'set' | 'skipped' | 'failed'."""
+    if not settings.telegram_bot_token:
+        return "skipped"
+    owns = client is None
+    client = client or httpx.AsyncClient(timeout=20)
+    base = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+    want = [{"command": c, "description": d} for c, d in COMMANDS]
+    try:
+        have = (await client.post(f"{base}/getMyCommands", json={})).json()
+        if have.get("ok") and have.get("result") == want:
+            return "ok"
+        reply = (await client.post(f"{base}/setMyCommands", json={"commands": want})).json()
+        if not reply.get("ok"):
+            raise ValueError(str(reply.get("description") or "setMyCommands"))
+        return "set"
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        logger.warning("commands: не удалось поставить меню (%s)", type(exc).__name__)
+        monitor.failure("telegram", exc)
+        return "failed"
+    finally:
+        if owns:
+            await client.aclose()
+
+
 def expected_url(settings: Settings) -> str:
     return f"{settings.public_url}{PATH}" if settings.public_url else ""
 

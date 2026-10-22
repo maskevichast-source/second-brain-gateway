@@ -17,6 +17,7 @@ from . import ada as ada_module
 from . import ask as ask_module
 from . import diary
 from . import monitor
+from . import owner as owner_module
 from . import review as review_module
 from . import snapshot as snapshot_module
 from .config import Settings
@@ -113,6 +114,7 @@ async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
             ok = (await (send(chat_id, text, buttons) if buttons else send(chat_id, text))) and ok
         return ok
 
+    owner_module.load(db)
     items = db.snapshot_items()
     fronts = [front for _, front in items]
     today = now.date()
