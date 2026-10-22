@@ -153,3 +153,12 @@ def test_recurring_items_roll_to_next_occurrence():
     )
     assert "15 октября (чт): Полить кактусы" in text     # 1, 8, 15 октября
     assert "Отчёт ежемесячный" in text and "просрочено на 11 дн.: Разовое старое" in text
+
+
+def test_fuzzy_search_finds_typos_and_forms_when_over_budget():
+    from app.vault import fuzzy_score
+    line = "[3] note | «Абонемент в бассейн» | теги: спорт"
+    assert fuzzy_score(["абонементы"], line) >= 1          # другая форма слова
+    assert fuzzy_score(["абанемент"], line) >= 1           # опечатка
+    assert fuzzy_score(["погода"], line) == 0
+    assert fuzzy_score(["бассейн"], line) == 0             # дословное совпадение считает обычный score

@@ -220,10 +220,42 @@ async def flush_stale_waiting(db: Database, process: Processor, notify=None, min
     return saved
 
 
+CONFIRM_BELOW = 0.5           # ниже этой уверенности ИИ секретарь сначала переспрашивает, а не сохраняет молча
+
+
+def _confirm_question(response: dict) -> str:
+    """Что секретарь понял, если уверенность низкая. Пустая строка: переспрашивать не нужно."""
+    if response.get("private") or response.get("fallback") or response.get("count", 1) == 0:
+        return ""
+    files = response.get("files") or []
+    weak = []
+    for f in files:
+        note = parse_note(f["markdown"], 1)
+        try:
+            conf = float(note.get("confidence")) if str(note.get("confidence")).strip() else 1.0
+        except ValueError:
+            conf = 1.0
+        if 0 < conf < CONFIRM_BELOW and f.get("type") in ("task", "event", "note", "idea", "learning", "interaction"):
+            weak.append(f)
+    if not weak:
+        return ""
+    names = {"task": "дело", "event": "событие", "note": "заметка", "idea": "идея", "learning": "знание",
+             "interaction": "разговор или встреча"}
+    rows = "\n".join(f"• {names[f['type']]}: «{f['title']}»" for f in weak[:4])
+    return (f"Не уверен, что понял правильно. Записал бы так:\n{rows}\n\n"
+            "Если верно, ответь «да» или /skip. Если нет, одним сообщением напиши, что поправить "
+            "(например: «это встреча, в пятницу в 15:00»). Через несколько минут без ответа сохраню как есть.")
+
+
 async def _save(db: Database, process: Processor, *, capture_id: str, content: str, revision: int,
-                clarifications: str = "") -> dict:
+                clarifications: str = "", confirm: bool = False) -> dict:
     response = await process(capture_id=capture_id, client="telegram", content=content,
                              revision=revision, clarifications=clarifications)
+    if confirm and revision == 1 and not response.get("needs_review") and db.get_setting("confirm_on", "1") == "1":
+        question = _confirm_question(response)
+        if question:                       # ничего не пишем в очередь, пока человек не подтвердил
+            response["needs_confirm"] = question
+            return response
     if not response.get("needs_review") or revision != 1:
         sources = sources_module.CURRENT.get()
         files = response["files"]
@@ -451,9 +483,12 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return _reply(chat_id, f"Слишком длинно: максимум {settings.max_content_chars} символов.")
 
     response = await _save(db, process, capture_id=capture_id, content=content, revision=revision,
-                           clarifications=clarifications)
+                           clarifications=clarifications, confirm=True)
     if revision == 2:
         db.clear_waiting(chat_id)
+    if response.get("needs_confirm") and revision == 1:
+        db.set_waiting(chat_id, capture_id, content, sources_module.CURRENT.get())
+        return _reply(chat_id, f"{expired}{response['needs_confirm']}")
     if response.get("needs_review") and revision == 1:
         db.set_waiting(chat_id, capture_id, content, sources_module.CURRENT.get())
         questions = "\n".join(f"• {q}" for q in response.get("review_questions", []))
@@ -869,10 +904,14 @@ def _push_command(text: str, db: Database, settings: Settings) -> str:
             db.set_setting("push_morning_on", "1")
     elif parts[:1] == ["неделя"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
         db.set_setting("push_week_on", "1" if parts[1] in ("вкл", "on") else "0")
+    elif parts[:1] == ["здоровье"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
+        db.set_setting("push_health_on", "1" if parts[1] in ("вкл", "on") else "0")
+    elif parts[:1] == ["подтверждения"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
+        db.set_setting("confirm_on", "1" if parts[1] in ("вкл", "on") else "0")
     elif parts[:1] == ["напоминания"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
         db.set_setting("push_rem_on", "1" if parts[1] in ("вкл", "on") else "0")
     elif parts:
-        return ("Команды: /push утро 08:30, /push утро выкл, /push неделя выкл, /push напоминания выкл. "
+        return ("Команды: /push утро 08:30, /push утро выкл, /push неделя выкл, /push напоминания выкл, /push подтверждения выкл, /push здоровье выкл. "
                 "Дневник отдельно: /diary время 21:00, /diary выкл.")
     cfg = scheduler.push_config(db)
     d_on, d_at = scheduler.get_diary_config(db)
@@ -882,6 +921,8 @@ def _push_command(text: str, db: Database, settings: Settings) -> str:
             f"• утренняя сводка: {yes(cfg['morning_on'])}, {cfg['morning_time']}\n"
             f"• напоминания в срок (с кнопками «через час»): {yes(cfg['rem_on'])}\n"
             f"• обзор недели (воскресенье, 19:00): {yes(cfg['week_on'])}\n"
+            f"• переспрашиваю, если не уверен в записи: {yes(db.get_setting('confirm_on', '1') == '1')}\n"
+            f"• проверка хранилища (понедельник, 10:00): {yes(cfg['health_on'])}\n"
             f"• дневник вечером: {yes(d_on)}, {d_at}" + tail)
 
 

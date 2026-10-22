@@ -200,3 +200,31 @@ def keywords(question: str) -> list[str]:
 def score(note: VaultNote, keys: list[str], line: str | None = None) -> int:
     haystack = (line or compact_line(note, 400)).lower()
     return sum(3 for key in keys if key in haystack)
+
+
+# ---------- нечёткий поиск: опечатки и другие формы слова (без нейросети) ----------
+
+def _trigrams(word: str) -> set[str]:
+    padded = f"  {word} "
+    return {padded[i:i + 3] for i in range(len(padded) - 2)}
+
+
+def fuzzy_score(keys: list[str], line: str, threshold: float = 0.55) -> int:
+    """1 балл за каждое слово вопроса, которого нет в строке дословно, но есть похожее по трёхбуквенным кускам
+    («абонемент» ~ «абонемента», «стомотолог» ~ «стоматолог»). Слабее точного совпадения (3 балла)."""
+    text = line.lower()
+    words = {w for w in re.findall(r"[\w-]+", text, flags=re.UNICODE) if len(w) >= 4}
+    if not words:
+        return 0
+    cache = None
+    points = 0
+    for key in keys:
+        if len(key) < 4 or key in text:
+            continue
+        if cache is None:
+            cache = [(w, _trigrams(w)) for w in words]
+        kt = _trigrams(key)
+        best = max((2 * len(kt & wt) / (len(kt) + len(wt)) for _, wt in cache), default=0.0)
+        if best >= threshold:
+            points += 1
+    return points

@@ -647,3 +647,27 @@ def test_tasks_command_buttons_and_words_end_to_end(tg):
     assert "Купить кабель" not in send(client, update("/tasks", uid=5)).json()["text"]
     service = client.get("/pending?service=1", headers=auth()).json()["items"]
     assert len([i for i in service if i.get("kind") == "close"]) == 2
+
+
+def test_low_confidence_note_is_confirmed_before_saving(tg):
+    client = tg(StubLLM(result(note(type="task", title="Что-то про Армана", body="что-то", confidence=0.3))))
+    reply = send(client, update("что-то про Армана", uid=30)).json()
+    assert "Не уверен" in reply["text"] and "Что-то про Армана" in reply["text"]
+    assert client.get("/pending", headers=auth()).json()["count"] == 0        # пока не подтвердили, в очередь не пишем
+    send(client, update("/skip", uid=31))
+    assert client.get("/pending", headers=auth()).json()["count"] == 1        # /skip сохраняет как есть
+
+
+def test_confident_note_is_saved_without_question(tg):
+    client = tg(StubLLM(result(note(type="task", title="Купить кабель", body="Купить кабель", confidence=0.9))))
+    reply = send(client, update("купить кабель", uid=32)).json()
+    assert "Не уверен" not in reply["text"]
+    assert client.get("/pending", headers=auth()).json()["count"] == 1
+
+
+def test_confirmation_can_be_switched_off(tg):
+    client = tg(StubLLM(result(note(type="task", title="Что-то", body="что-то", confidence=0.2))))
+    send(client, update("/push подтверждения выкл", uid=33))
+    reply = send(client, update("что-то", uid=34)).json()
+    assert "Не уверен" not in reply["text"]
+    assert client.get("/pending", headers=auth()).json()["count"] == 1

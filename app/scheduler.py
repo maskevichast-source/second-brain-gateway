@@ -42,6 +42,7 @@ def push_config(db: Database) -> dict:
         "morning_on": db.get_setting("push_morning_on", "1") == "1",
         "morning_time": db.get_setting("push_morning_time", "") or MORNING_DEFAULT,
         "week_on": db.get_setting("push_week_on", "1") == "1",
+        "health_on": db.get_setting("push_health_on", "1") == "1",
         "rem_on": db.get_setting("push_rem_on", "1") == "1",
     }
 
@@ -91,6 +92,16 @@ def due_reminders(items: list[tuple[str, dict]], db: Database, now: datetime) ->
     return out
 
 
+def week_buttons(keyed_notes: list, today, limit: int = 6) -> list:
+    """Кнопки под обзором недели: открыть панель (готово, отмена, перенос) для самых просроченных дел."""
+    from . import ask as ask_module
+
+    items = [i for i in ask_module.collect_items(keyed_notes, today) if i.key and i.day < today]
+    items.sort(key=lambda i: i.day)
+    rows = [[(f"✅ {i.title[:24]}", f"it:{i.key}")] for i in items[:limit]]
+    return rows
+
+
 async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
     """Одна проверка. Возвращает число отправленных сообщений."""
     sent = 0
@@ -130,9 +141,10 @@ async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
     if cfg["morning_on"] and notes and now.hour < 12 and db.get_setting("push_morning_last", "") != today.isoformat():
         hh, mm = (int(x) for x in cfg["morning_time"].split(":"))
         if (now.hour, now.minute) >= (hh, mm):
-            text, digest_buttons = actions_module.render_day(db, now)
+            loans_line = await ada_module.fetch_loans_brief(settings) if ada_module.configured(settings) else ""
+            text, digest_buttons = actions_module.render_day(db, now, ada_brief=loans_line)
             back = review_module.format_resurface(review_module.pick_resurface(notes, today), today)
-            if "Срочного нет" in text and not back:
+            if "Срочного нет" in text and not back and not loans_line:
                 db.set_setting("push_morning_last", today.isoformat())
             else:
                 if back:
@@ -146,9 +158,19 @@ async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
     if (cfg["week_on"] and notes and today.weekday() == 6 and now.hour >= int(WEEK_TIME[:2])
             and db.get_setting("push_week_last", "") != week_id):
         ada_text = await ada_module.fetch_summary(settings) if ada_module.configured(settings) else ""
-        if await broadcast(review_module.build_week_review(notes, now, ada_text)):
+        keyed = actions_module.keyed_notes(db)
+        buttons = week_buttons(keyed, today)
+        if await broadcast(review_module.build_week_review(keyed, now, ada_text), buttons or None):
             db.set_setting("push_week_last", week_id)
         sent += len(chats)
+
+    # проверка хранилища по понедельникам: сообщение только если есть замечания
+    if (cfg["health_on"] and notes and today.weekday() == 0 and now.hour >= 10
+            and db.get_setting("push_health_last", "") != week_id):
+        score, issues = review_module.build_health(notes, today)
+        if not issues or await broadcast("🩺 " + review_module.format_health(notes, today)):
+            db.set_setting("push_health_last", week_id)
+        sent += len(chats) if issues else 0
     return sent
 
 

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_SECONDS = 300.0
 _cache: dict[str, tuple[float, str]] = {}
+_raw: dict[str, dict] = {}          # последний разобранный ответ «Ады»: из него строится утренняя строка про кредиты
 
 
 def _num(value: Any) -> float | None:
@@ -101,6 +102,13 @@ def format_summary(data: dict) -> str:
         for s in [s for s in (subs.get("upcoming") or []) if isinstance(s, dict)][:4]:
             lines.append(f"  – {_s(s.get('name'))}: {money(s.get('amount'), cur)}"
                          + (f", {_s(s.get('date'), 10)}" if s.get("date") else ""))
+    loans = data.get("loans") if isinstance(data.get("loans"), dict) else {}
+    if loans.get("count"):
+        lines.append(f"• кредиты: {loans['count']} шт., общий остаток {money(loans.get('balance'), cur)}"
+                     + (f", до {_s(loans.get('last_end'), 7)}" if loans.get("last_end") else "")
+                     + (f"; до конца месяца платить ещё {money(loans.get('month_left'), cur)}" if _num(loans.get("month_left")) else ""))
+        for p in [p for p in (loans.get("soon") or []) if isinstance(p, dict)][:5]:
+            lines.append(f"  – {_s(p.get('name'))}: {money(p.get('amount'), cur)}, {_s(p.get('date'), 10)}")
     goals = [g for g in (data.get("goals") or []) if isinstance(g, dict)][:4]
     if goals:
         lines.append("• цели: " + "; ".join(
@@ -129,7 +137,10 @@ async def fetch_summary(settings: Settings, http_client: httpx.AsyncClient | Non
             timeout=settings.ada_timeout,
         )
         response.raise_for_status()
-        text = format_summary(response.json())
+        payload = response.json()
+        text = format_summary(payload)
+        if isinstance(payload, dict):
+            _raw[key] = payload
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("ADA: сводка недоступна (%s)", type(exc).__name__)
         monitor.failure("ada", exc)
@@ -143,6 +154,31 @@ async def fetch_summary(settings: Settings, http_client: httpx.AsyncClient | Non
 
 def clear_cache() -> None:
     _cache.clear()
+    _raw.clear()
+
+
+def loans_brief(data: dict, days: int = 3) -> str:
+    """Строка для утренней сводки: платежи по кредитам в ближайшие дни. Пусто, если платить не скоро."""
+    loans = data.get("loans") if isinstance(data, dict) and isinstance(data.get("loans"), dict) else {}
+    cur = _s(data.get("currency"), 4) or "₸" if isinstance(data, dict) else "₸"
+    soon = [p for p in (loans.get("soon") or []) if isinstance(p, dict) and _num(p.get("days_left")) is not None
+            and 0 <= _num(p["days_left"]) <= days]
+    if not soon:
+        return ""
+    rows = []
+    for p in soon[:5]:
+        left = int(_num(p["days_left"]))
+        when = "сегодня" if left == 0 else ("завтра" if left == 1 else f"через {left} дн.")
+        rows.append(f"• {_s(p.get('name'))}: {money(p.get('amount'), cur)}, {when}")
+    return "Платежи по кредитам:\n" + "\n".join(rows)
+
+
+async def fetch_loans_brief(settings: Settings, http_client: httpx.AsyncClient | None = None) -> str:
+    """Утренняя строка про ближайшие платежи по кредитам или пустая строка (Ада не настроена или недоступна)."""
+    if not configured(settings):
+        return ""
+    await fetch_summary(settings, http_client)
+    return loans_brief(_raw.get(settings.ada_summary_url, {}))
 
 
 def homecare_url(settings: Settings) -> str:

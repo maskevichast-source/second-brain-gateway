@@ -20,7 +20,7 @@ from . import monitor
 from .config import Settings
 from .llm import WEEKDAYS, _neutralize
 from .textutil import one_line, parse_date
-from .vault import VaultNote, compact_line, keywords, score, unlink
+from .vault import VaultNote, compact_line, fuzzy_score, keywords, score, unlink
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +277,7 @@ def select_lines(notes: list[VaultNote], question: str, budget: int,
     keys = list(dict.fromkeys(keywords(question) + list(extra_keys or [])))
     ranked = sorted(
         range(len(pairs)),
-        key=lambda i: (-score(pairs[i][0], keys, pairs[i][1]), -i),  # при равенстве свежие (поздние) раньше
+        key=lambda i: (-(score(pairs[i][0], keys, pairs[i][1]) + fuzzy_score(keys, pairs[i][1])), -i),  # при равенстве свежие раньше
     )
     chosen, used = [], 0
     for i in ranked:
@@ -326,7 +326,11 @@ class NoteIndex:
         candidates: set[int] = set()
         for key in keys:
             candidates.update(self.postings.get(_stem(key), ()))
-        scored = sorted(((-score(self.notes[i], keys, self.lines[i]), -i) for i in candidates))
+        if len(candidates) < 8:       # точных попаданий мало: добавим похожие по написанию (опечатки, другие формы слов)
+            for i, line in enumerate(self.lines):
+                if i not in candidates and fuzzy_score(keys, line):
+                    candidates.add(i)
+        scored = sorted(((-(score(self.notes[i], keys, self.lines[i]) + fuzzy_score(keys, self.lines[i])), -i) for i in candidates))
         ranked = [-j for _, j in scored]
         ranked += [i for i in range(len(self.notes) - 1, -1, -1) if i not in candidates]   # остальные: свежие раньше
         chosen, used = [], 0

@@ -5,7 +5,7 @@ import random
 from collections import Counter
 from datetime import date, datetime, timedelta
 
-from .ask import build_digest, collect_items, fmt_date
+from .ask import build_digest, collect_items, fmt_date, repeat_days
 from .schema import TYPES
 from .textutil import one_line, parse_date
 from .vault import VaultNote, as_list, strip_original
@@ -58,6 +58,22 @@ def build_week_review(notes: list[VaultNote], now: datetime, ada_text: str = "")
         out += ["", f"Давно не общались (больше {STALE_CONTACT_DAYS} дней):"] + [
             f"• {t}" + (f" ({r})" if r else "") + f" — последний контакт {fmt_date(date.fromisoformat(d))}"
             for d, t, r in stale[:8]]
+
+    made = [n for n in fresh if n.type == "decision"]
+    if made:
+        out += ["", "Решили за неделю:"] + [f"• {n.title}" for n in made[:8]]
+
+    owed = [n for n in notes if n.type == "task" and str(n.get("status")) not in CLOSED and str(n.get("promise")) in ("я", "мне")]
+    if owed:
+        mine = sum(1 for n in owed if str(n.get("promise")) == "я")
+        out += ["", f"Обещания открыты: я должен {mine}, мне должны {len(owed) - mine}. Подробности: /promises"]
+
+    stuck = [n for n in notes if n.type == "task" and str(n.get("status")) not in CLOSED
+             and (_created(n) or today) <= today - timedelta(days=21)
+             and not any(i.title == n.title for i in overdue)]
+    if stuck:
+        out += ["", "Зависло больше 3 недель (закрыть, назначить срок или выбросить):"] + [
+            f"• {n.title}" for n in stuck[:8]]
 
     decisions = [n for n in notes if n.type == "decision" and str(n.get("status")) in ("пересмотреть",)]
     if decisions:
@@ -362,6 +378,24 @@ def build_health(notes: list[VaultNote], today: date) -> tuple[int, list[str]]:
     if bare:
         penalty += min(10, len(bare))
         issues.append(f"Карточки людей без роли: {len(bare)}. Например: " + "; ".join(f"«{n.title}»" for n in bare[:3]))
+    past_events = [n for n in notes if n.type == "event" and str(n.get("status")) not in ("состоялось", "отменено")
+                   and (parse_date(n.get("event_at")) or "9999") < (today - timedelta(days=3)).isoformat()]
+    if past_events:
+        penalty += min(10, len(past_events))
+        issues.append(f"События в прошлом без отметки «состоялось»: {len(past_events)}. Например: "
+                      + "; ".join(f"«{n.title}»" for n in past_events[:3]))
+    long_overdue = [n for n in notes if n.type == "task" and str(n.get("status")) not in CLOSED
+                    and (parse_date(n.get("due")) or "9999") < (today - timedelta(days=30)).isoformat()
+                    and not repeat_days(n.get("repeat") or n.get("schedule"))]
+    if long_overdue:
+        penalty += min(15, 2 * len(long_overdue))
+        issues.append(f"Дела просрочены больше месяца: {len(long_overdue)}. Закрой или перенеси: "
+                      + "; ".join(f"«{n.title}»" for n in long_overdue[:3]))
+    cold = [n for n in notes if n.type == "person" and str(n.get("status")) != "неактуален" and (n.get("orbit") or n.get("cadence_days"))
+            and not parse_date(n.get("last_contact"))]
+    if cold:
+        penalty += min(5, len(cold))
+        issues.append(f"Людям задан круг, а даты последнего контакта нет: {len(cold)}. Радар считает их «давно не общались».")
     return max(0, 100 - penalty), issues
 
 
