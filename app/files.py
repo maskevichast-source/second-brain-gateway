@@ -91,10 +91,35 @@ def vision_enabled(settings: Settings) -> bool:
     return bool(settings.vision_model and _vision_key(settings))
 
 
+def shrink_image(data: bytes, limit: int = MAX_IMAGE_BYTES) -> tuple[bytes, str]:
+    """Большую картинку (скриншот iPhone, фото) уменьшает до JPEG, который принимает vision-модель.
+    Возвращает (байты, mime). Нет Pillow или картинка не читается — вернёт как есть."""
+    if len(data) <= limit:
+        return data, ""
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(data)) as image:
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            for side, quality in ((2400, 85), (1800, 80), (1400, 75), (1000, 70)):
+                work = image.copy()
+                work.thumbnail((side, side))
+                out = io.BytesIO()
+                work.save(out, "JPEG", quality=quality)
+                if out.tell() <= limit:
+                    return out.getvalue(), "image/jpeg"
+    except Exception as exc:  # noqa: BLE001 - любая ошибка Pillow: сохраняем запись без распознавания
+        logger.warning("files: не удалось уменьшить картинку (%s)", type(exc).__name__)
+    return data, ""
+
+
 async def describe_image(settings: Settings, data: bytes, mime: str = "image/jpeg",
                          http_client: httpx.AsyncClient | None = None) -> str | None:
     """Текст с картинки через OpenAI-совместимый /chat/completions (Groq vision) или None."""
-    if not vision_enabled(settings) or not data or len(data) > MAX_IMAGE_BYTES:
+    if not vision_enabled(settings) or not data:
+        return None
+    data, new_mime = shrink_image(data)
+    mime = new_mime or mime
+    if len(data) > MAX_IMAGE_BYTES:
         return None
     owns = http_client is None
     client = http_client or httpx.AsyncClient(timeout=60)

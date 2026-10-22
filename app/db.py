@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS tg_pending (
     created_at TEXT NOT NULL,
     sources    TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS blobs (
+    key        TEXT PRIMARY KEY,
+    data       BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -119,6 +124,7 @@ class Database:
             removed += conn.execute("DELETE FROM tg_state WHERE created_at < ?", (state_cutoff,)).rowcount
             outbox_cutoff = (datetime.now(timezone.utc) - self.outbox_ttl).isoformat(timespec="seconds")
             removed += conn.execute("DELETE FROM outbox WHERE created_at < ?", (outbox_cutoff,)).rowcount
+            removed += conn.execute("DELETE FROM blobs WHERE created_at < ?", (outbox_cutoff,)).rowcount
             conn.commit()
             if removed or vacuum:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -193,7 +199,7 @@ class Database:
         added = 0
         with closing(self._connect()) as conn:
             for p in planned:
-                meta = {k: p[k] for k in ("file_id", "mime", "size", "kind", "name") if k in p}
+                meta = {k: p[k] for k in ("file_id", "blob", "mime", "size", "kind", "name") if k in p}
                 added += conn.execute(
                     "INSERT OR IGNORE INTO outbox (capture_id, filename, folder, markdown, created_at, reminders, kind) "
                     "VALUES (?, ?, ?, ?, ?, '[]', 'file')",
@@ -201,6 +207,18 @@ class Database:
                 ).rowcount
             conn.commit()
         return added
+
+    def put_blob(self, key: str, data: bytes) -> None:
+        """Оригинал файла, присланного шорткатом: лежит в очереди до выгрузки (его нет в Telegram, чтобы скачать позже)."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with closing(self._connect()) as conn:
+            conn.execute("INSERT OR REPLACE INTO blobs (key, data, created_at) VALUES (?, ?, ?)", (key, data, now))
+            conn.commit()
+
+    def get_blob(self, key: str) -> bytes | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT data FROM blobs WHERE key = ?", (key,)).fetchone()
+        return bytes(row["data"]) if row else None
 
     def get_item(self, item_id: int) -> dict | None:
         with closing(self._connect()) as conn:
@@ -220,8 +238,8 @@ class Database:
             conn.commit()
         return added
 
-    def pending(self, limit: int = 50, service: bool = False) -> list[dict]:
-        where = "" if service else "WHERE kind = 'note'"
+    def pending(self, limit: int = 50, service: bool = False, files: bool = False) -> list[dict]:
+        where = "" if service else "WHERE kind IN ('note', 'file')" if files else "WHERE kind = 'note'"
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT id, capture_id, filename, folder, markdown, created_at, reminders, kind FROM outbox "
@@ -229,8 +247,8 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def pending_count(self, service: bool = False) -> int:
-        where = "" if service else "WHERE kind = 'note'"
+    def pending_count(self, service: bool = False, files: bool = False) -> int:
+        where = "" if service else "WHERE kind IN ('note', 'file')" if files else "WHERE kind = 'note'"
         with closing(self._connect()) as conn:
             return conn.execute(f"SELECT COUNT(*) FROM outbox {where}").fetchone()[0]
 
@@ -243,9 +261,15 @@ class Database:
         if not ids:
             return 0
         with closing(self._connect()) as conn:
-            removed = conn.execute(
-                f"DELETE FROM outbox WHERE id IN ({','.join('?' * len(ids))})", ids
-            ).rowcount
+            marks = ",".join("?" * len(ids))
+            for row in conn.execute(f"SELECT markdown FROM outbox WHERE kind = 'file' AND id IN ({marks})", ids).fetchall():
+                try:
+                    key = json.loads(row["markdown"]).get("blob")
+                except (ValueError, AttributeError):
+                    key = None
+                if key:                                           # файл выгружен: освобождаем место на сервере
+                    conn.execute("DELETE FROM blobs WHERE key = ?", (key,))
+            removed = conn.execute(f"DELETE FROM outbox WHERE id IN ({marks})", ids).rowcount
             conn.commit()
             if removed:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

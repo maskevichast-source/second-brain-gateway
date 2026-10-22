@@ -84,3 +84,38 @@ async def transcribe(settings: Settings, file_id: str, http_client: httpx.AsyncC
     finally:
         if owns:
             await client.aclose()
+
+
+def bytes_configured(settings: Settings) -> bool:
+    return bool(settings.stt_api_key)
+
+
+async def transcribe_bytes(settings: Settings, data: bytes, filename: str = "audio.m4a", mime: str = "audio/mp4",
+                           hint: str = "", http_client: httpx.AsyncClient | None = None) -> str | None:
+    """Текст аудио, присланного прямо на сервер (шорткат iPhone), или None. Аудио нигде не сохраняется этой функцией."""
+    if not bytes_configured(settings) or not data or len(data) > MAX_BYTES:
+        return None
+    owns = http_client is None
+    client = http_client or httpx.AsyncClient(timeout=120)
+    try:
+        response = await client.post(
+            f"{settings.stt_base_url}/audio/transcriptions",
+            headers={"Authorization": f"Bearer {settings.stt_api_key}"},
+            files={"file": (filename or "audio.m4a", data, mime or "audio/mp4")},
+            data={"model": settings.stt_model, "language": "ru", "response_format": "json",
+                  **({"prompt": hint[:HINT_CHARS + 20]} if hint else {})},
+        )
+        response.raise_for_status()
+        text = str(response.json().get("text", "")).strip()
+        return text or None
+    except httpx.HTTPStatusError as exc:
+        logger.warning("stt: ошибка API %s", exc.response.status_code)
+        monitor.failure("stt", exc)
+        return None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("stt: не удалось распознать (%s)", type(exc).__name__)
+        monitor.failure("stt", exc)
+        return None
+    finally:
+        if owns:
+            await client.aclose()

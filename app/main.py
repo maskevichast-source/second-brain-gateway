@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import json
 import logging
@@ -26,6 +28,7 @@ from . import monitor as monitor_module
 from . import review as review_module
 from . import scheduler as scheduler_module
 from . import snapshot as snapshot_module
+from . import sources as sources_module
 from . import stt as stt_module
 from . import webhook as webhook_module
 from . import links as links_module
@@ -56,6 +59,35 @@ class CaptureRequest(BaseModel):
     user_clarifications: str = ""
     context: str | None = None            # необязательно: профиль из хранилища (перекрывает сохранённый на сервере)
     known_people: list[dict] | None = None
+
+
+class CaptureFileRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    capture_id: str | None = None
+    client: str = "ios"
+    filename: str = ""
+    mime: str = ""
+    file_base64: str = ""
+    content: str = ""                     # подпись к файлу (необязательно)
+    context: str | None = None
+    known_people: list[dict] | None = None
+
+
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+_AUDIO_EXT = (".m4a", ".mp3", ".wav", ".ogg", ".oga", ".aac", ".caf", ".mp4", ".mov", ".webm")
+_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+
+
+def _upload_kind(filename: str, mime: str) -> str:
+    name, mime = filename.lower(), mime.lower()
+    if mime == "application/pdf" or name.endswith(".pdf"):
+        return "pdf"
+    if mime.startswith("audio/") or mime.startswith("video/") or name.endswith(_AUDIO_EXT):
+        return "голос" if (mime.startswith("audio/") or name.endswith(_AUDIO_EXT)) else "видео"
+    if mime.startswith("image/") or name.endswith(_IMAGE_EXT) or name.endswith((".heic", ".heif")):
+        return "скрин"
+    return "файл"
 
 
 class PersonIn(BaseModel):
@@ -138,6 +170,7 @@ def create_app(
     alert_sender: Callable[..., Awaitable] | None = None,
     file_fetcher: Callable[..., Awaitable] | None = None,
     vision: Callable[..., Awaitable] | None = None,
+    audio_transcriber: Callable[..., Awaitable] | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     transcriber_given = transcriber is not None
@@ -148,6 +181,8 @@ def create_app(
     transcriber = transcriber or (lambda file_id: stt_module.transcribe(
         settings, file_id, hint=stt_module.build_hint([p["name"] for p in db.known_people()], db.get_facts())))
     clock = clock or (lambda: datetime.now(ZoneInfo(settings.timezone)))
+    audio_transcriber = audio_transcriber or (lambda data, name, mime: stt_module.transcribe_bytes(
+        settings, data, name, mime, hint=stt_module.build_hint([p["name"] for p in db.known_people()], db.get_facts())))
 
     db = Database(settings.data_dir / "brain.db", ttl_hours=settings.response_ttl_hours,
                   outbox_ttl_days=settings.outbox_ttl_days)
@@ -325,6 +360,97 @@ def create_app(
             known=clean_people(payload.known_people) if payload.known_people is not None else None,
         )
 
+    @app.post("/capture_file")
+    async def capture_file(request: Request):
+        """Оригинал с шортката iPhone: скриншот, фото, голос, PDF. Распознаём текст, делаем заметку и кладём файл в очередь
+        исходников (его заберёт ноутбук или шорткат; на сервере он лежит до выгрузки, не дольше OUTBOX_TTL_DAYS)."""
+        provided = request.headers.get("x-api-key", "")
+        if not hmac.compare_digest(provided.encode("utf-8"), settings.capture_token.encode("utf-8")):
+            return _error(401, "Неверный или отсутствующий x-api-key")
+        if not limiter.allow():
+            return _error(429, "Слишком много запросов, попробуйте через минуту")
+        raw = await request.body()
+        if len(raw) > MAX_UPLOAD_BYTES * 4 // 3 + 8192:
+            return _error(413, "Файл больше 20 МБ")
+        try:
+            payload = CaptureFileRequest.model_validate(json.loads(raw))
+        except (ValueError, ValidationError):
+            return _error(422, "Тело запроса: JSON с полями file_base64, filename, mime и (необязательно) content")
+        encoded = payload.file_base64.strip()
+        if encoded.startswith("data:") and "," in encoded:
+            encoded = encoded.split(",", 1)[1]
+        try:
+            data = base64.b64decode("".join(encoded.split()), validate=False)
+        except (binascii.Error, ValueError):
+            return _error(422, "file_base64 не расшифровался: ожидается base64 файла")
+        if not data:
+            return _error(422, "Поле file_base64 пустое")
+        if len(data) > MAX_UPLOAD_BYTES:
+            return _error(413, "Файл больше 20 МБ")
+        capture_id = (payload.capture_id or "").strip()
+        if capture_id and not is_valid_capture_id(capture_id):
+            return _error(422, "capture_id: 8–64 символа, только латиница, цифры, - и _")
+        capture_id = capture_id or f"srv-{int(time.time() * 1000)}"
+
+        name = " ".join((payload.filename or "").split())[:120]
+        mime = (payload.mime or "").strip().lower()
+        kind = _upload_kind(name, mime)
+        caption = payload.content.strip()
+        private, plain = split_private(caption) if caption else (False, "")
+        text, notice = "", ""
+        if kind == "pdf":
+            text = files_module.extract_pdf_text(data)
+            notice = "PDF прочитан" if text else "текст из PDF не извлёкся"
+        elif private:
+            notice = "режим «!»: файл никуда не отправлялся, сохранён только оригинал"
+        elif kind == "скрин":
+            recognized = await vision(data, mime or "image/jpeg") if vision else None
+            text = recognized or ""
+            notice = ("текст с картинки распознан ИИ" if text else
+                      "текст не распознан: " + ("распознавание картинок выключено (нужна переменная VISION_MODEL)"
+                                                if vision is None else "модель ничего не вернула"))
+        elif kind in ("голос", "видео"):
+            heard = await audio_transcriber(data, name or "audio.m4a", mime or "audio/mp4") if stt_module.bytes_configured(settings) else None
+            text = heard or ""
+            notice = "речь расшифрована" if text else (
+                "речь не расшифрована" + ("" if stt_module.bytes_configured(settings) else ": нужен STT_API_KEY"))
+        label = {"pdf": "PDF", "скрин": "скриншот или фото", "голос": "голосовая запись", "видео": "видео"}.get(kind, "файл")
+        title = f"{label}" + (f" «{name}»" if name else "")
+        head = (plain + "\n" if plain else "")
+        if text:
+            kind_note = {"pdf": f"Источник: PDF: {name or 'без имени'}",
+                         "скрин": "Текст с картинки (распознан ИИ, возможны ошибки):",
+                         "голос": "Расшифровка голоса:", "видео": "Расшифровка аудио:"}.get(kind, "")
+            room = max(500, settings.max_content_chars - len(head) - 200)
+            body = text[:min(room, files_module.MAX_PDF_CHARS if kind == "pdf" else 6000)]
+            content = f"{head}(вложение с iPhone: {title})\n{kind_note}\n{body}".strip()
+        else:
+            content = f"{head}Вложение с iPhone: {title}".strip()
+        if private:
+            content = "! " + content
+        known = clean_people(payload.known_people) if payload.known_people is not None else None
+        response = await process(capture_id=capture_id, client=payload.client, content=content, revision=1,
+                                 clarifications="", context=clean_context(payload.context, settings) if payload.context is not None else None,
+                                 known=known)
+        if response.get("needs_review"):          # шорткат не ведёт диалог про файл: сохраняем как есть
+            response = await process(capture_id=capture_id, client=payload.client, content=content, revision=2,
+                                     clarifications="", context=None, known=known)
+        files = response.get("files") or []
+        item = {"blob": f"{capture_id}-1", "kind": kind, "name": name or {"скрин": "image.jpg", "голос": "voice.m4a", "pdf": "file.pdf"}.get(kind, "file"),
+                "mime": mime or "application/octet-stream", "size": len(data)}
+        planned: list[dict] = []
+        if files:
+            planned = sources_module.plan([item], capture_id, files[0]["filename"][:10])
+            for f in files:
+                f["markdown"] = sources_module.attach(f["markdown"], planned)
+        db.put_blob(item["blob"], data)
+        db.enqueue_files(capture_id, planned or sources_module.plan([item], capture_id, "без-даты"))
+        response = {**response, "files": files, "recognized": bool(text), "file_notice": notice,
+                    "sources": [{"filename": p["filename"], "folder": p["folder"], "kind": p["kind"]} for p in planned]}
+        if files:                                              # старые клиенты читают первую заметку из корня
+            response.update(filename=files[0]["filename"], folder=files[0]["folder"], markdown=files[0]["markdown"])
+        return response
+
     def authorized(request: Request) -> bool:
         provided = request.headers.get("x-api-key", "")
         return hmac.compare_digest(provided.encode("utf-8"), settings.capture_token.encode("utf-8"))
@@ -388,15 +514,16 @@ def create_app(
         return {"status": "success"}
 
     @app.get("/pending")
-    async def pending(request: Request, limit: int = 50, service: int = 0):
+    async def pending(request: Request, limit: int = 50, service: int = 0, files: int = 0):
         if not authorized(request):
             return _error(401, "Неверный или отсутствующий x-api-key")
         with_service = bool(service)               # служебные записи отдаём только скрипту ноутбука (?service=1)
-        items = db.pending(max(1, min(limit, 200)), service=with_service)
+        with_files = bool(files)                   # телефон может забирать и исходники (?files=1), но не служебные записи
+        items = db.pending(max(1, min(limit, 200)), service=with_service, files=with_files)
         return {
             "status": "success",
             "count": len(items),
-            "remaining": db.pending_count(service=with_service),
+            "remaining": db.pending_count(service=with_service, files=with_files),
             "items": [
                 {"id": i["id"], "kind": i["kind"], "filename": i["filename"], "folder": i["folder"], "markdown": i["markdown"],
                  "reminders": json.loads(i["reminders"] or "[]")}
@@ -416,6 +543,12 @@ def create_app(
             meta = json.loads(item["markdown"])
         except ValueError:
             return _error(404, "Такого файла в очереди нет")
+        if meta.get("blob"):                      # файл прислан шорткатом: лежит на сервере до выгрузки
+            data = db.get_blob(str(meta["blob"]))
+            if data is None:
+                return _error(404, "Такого файла в очереди нет")
+            return Response(content=data, media_type=str(meta.get("mime") or "application/octet-stream"),
+                            headers={"Cache-Control": "no-store"})
         if file_fetcher is None:
             return _error(503, "На сервере нет токена бота: файл скачать нельзя")
         data = await file_fetcher(str(meta.get("file_id") or ""))
