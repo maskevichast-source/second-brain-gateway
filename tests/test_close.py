@@ -181,3 +181,28 @@ def test_interview_jump_to_number(tmp_path):
     db.set_state(1, "person", {"current": "X", "rest": [], "resume": {"i": 3, "saved": 2}})
     text = telegram._interview_start(1, db, "22")["text"]
     assert db.get_state(1)[0] == "interview" and db.get_state(1)[1]["i"] == 21 and "[22/" in text
+
+
+def test_vault_archive_moves_person_card_and_never_overwrites(tmp_path):
+    people = tmp_path / "1-Люди"
+    people.mkdir()
+    card = "---\ntitle: Левый контакт\ntype: person\ncreated: 2026-10-01\n---\n\nтелефон\n"
+    (people / "Левый контакт.md").write_text(card, encoding="utf-8")
+    payload = {"action": "archive", "title": "Левый контакт", "created": "", "type": "person"}
+    assert vault_sync.archive_note(tmp_path, payload) == "archived"
+    assert not (people / "Левый контакт.md").exists()
+    moved = tmp_path / "3-Архив" / "Удалённые-контакты" / "Левый контакт.md"
+    assert moved.read_text(encoding="utf-8") == card                       # файл цел, не стёрт
+    assert vault_sync.archive_note(tmp_path, payload) == "not_found"       # повтор безопасен
+    (people / "Левый контакт.md").write_text(card, encoding="utf-8")       # такое имя уже есть в архиве: не перезаписываем
+    assert vault_sync.archive_note(tmp_path, payload) == "archived"
+    assert len(list(moved.parent.glob("*.md"))) == 2
+
+
+def test_vault_archive_refuses_non_person_and_bad_payload(tmp_path):
+    (tmp_path / "0-Inbox").mkdir()
+    (tmp_path / "0-Inbox" / "Дело.md").write_text("---\ntitle: Дело\ntype: task\n---\n", encoding="utf-8")
+    assert vault_sync.archive_note(tmp_path, {"action": "archive", "title": "Дело", "type": "person"}) == "not_person"
+    assert (tmp_path / "0-Inbox" / "Дело.md").exists()
+    assert vault_sync.archive_note(tmp_path, {"action": "archive", "title": "", "type": "person"}) == "invalid"
+    assert vault_sync.archive_note(tmp_path, {"action": "archive", "title": "Дело", "type": "task"}) == "invalid"

@@ -356,6 +356,18 @@ class Database:
             self._snapshot_write(conn, rows, max_rows)
             conn.commit()
 
+    def snapshot_delete(self, key: str) -> int:
+        """Убрать одну заметку из среза (например, карточку, отправленную в архив)."""
+        with closing(self._connect()) as conn:
+            count = conn.execute("DELETE FROM snapshot WHERE key = ?", (key,)).rowcount
+            conn.commit()
+        return count
+
+    def forget_person(self, name: str) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute("DELETE FROM known_people WHERE name = ?", (name,))
+            conn.commit()
+
     def snapshot_replace(self, rows: list[tuple[str, dict]], max_rows: int = 20000) -> None:
         """Полная замена среза одной транзакцией: при сбое посередине остаётся прежний срез, а не пустой."""
         with closing(self._connect()) as conn:
@@ -495,7 +507,7 @@ class Database:
             self.set_setting("interview_progress", json.dumps({**data, "paused": False}, ensure_ascii=False))
 
     # сколько минут вопрос ждёт ответа, прежде чем бот перестанет принимать за него обычные сообщения
-    STATE_IDLE_MINUTES = {"person": 30, "diary": 180, "interview": 180, "resched": 30}
+    STATE_IDLE_MINUTES = {"person": 30, "diary": 180, "interview": 180, "resched": 30, "contacts": 180}
 
     def get_state(self, chat_id: int) -> tuple[str, dict] | None:
         with closing(self._connect()) as conn:
@@ -520,7 +532,7 @@ class Database:
                 data = {**data, "paused": True}    # долгая тишина: обычные записи снова идут как записи
                 self.set_state(chat_id, "interview", data)
                 return ("interview", data)
-            if kind in ("diary", "resched"):
+            if kind in ("diary", "resched", "contacts"):
                 self.clear_state(chat_id)
                 return None
         return (kind, data)

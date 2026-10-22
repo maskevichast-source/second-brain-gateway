@@ -17,6 +17,7 @@ import re
 from typing import Awaitable, Callable
 
 from . import actions as actions_module
+from . import contacts_review
 from . import diary, interview
 from . import when as when_module
 from . import sources as sources_module
@@ -38,6 +39,7 @@ HELP = (
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
     "/who Имя (или /brief) — что знать перед встречей, /promises — кто что кому обещал, /radar — с кем давно не общались, /budget — бюджет из «Ады».\n"
     "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
+    "• /contacts — переберём карточки людей без данных: ответь, кто это, или убери ненужный контакт в архив (не удаляется навсегда).\n"
     "• /push — что я присылаю сам: утренняя сводка, напоминания в срок, обзор недели (настройка и отключение).\n"
     "• /fact текст — короткий факт для меня, например «Собаку зовут Янка» (имена, клички, места): учту в записях и в расшифровке голосовых.\n"
     "• /requeue 6 — если заметки забрали, но они не сохранились: верну в очередь заметки за последние 6 часов (не дольше 24).\n"
@@ -335,7 +337,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             command, text = "/interview", "/interview"
         elif re.match(r"^(стоп|хватит|пауза|остановись|останови|закончим|заканчиваем)\W*$", low):
             current = db.get_state(chat_id)
-            if current and current[0] in ("interview", "person", "diary"):
+            if current and current[0] in ("interview", "person", "diary", "contacts"):
                 command, text = "/stop", "/stop"
     if command in ("/ask", "/day", "/tasks", "/import", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
@@ -382,6 +384,8 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return await _backup_command(chat_id, db, now, backup_sender)
     if command == "/status":
         return _reply(chat_id, _status_text(db))
+    if command in ("/contacts", "/контакты"):
+        return _contacts_start(chat_id, db)
     if command == "/people":
         known = db.known_people()
         if not known:
@@ -436,6 +440,9 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         meta = _interview_meta(chat_id, text, state[1], db)
         if meta:
             return meta
+    if state and state[0] == "contacts" and command in ("", "/skip") and not (
+            command == "" and (len(text) > 400 or _URL.search(text))):
+        return await _contacts_answer(chat_id, update_id, text, command, state[1], db, process)
     if state and not new_note and not (command == "" and not in_interview and (len(text) > 400 or _URL.search(text))) \
             and command in ("", "/skip"):
         kind, data = state
@@ -498,6 +505,105 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
     if new:
         return _reply(chat_id, _ask_person(chat_id, db, new[:4], summary))
     return _reply(chat_id, summary)
+
+
+# ---------- разбор карточек людей: /contacts ----------
+
+def _contacts_card(db: Database, key: str):
+    for row_key, front in db.snapshot_items():
+        if row_key[:12] == key:
+            return row_key, front
+    return None
+
+
+def _contacts_done_add(db: Database, title: str) -> None:
+    done = contacts_review.load_done(db.get_setting(contacts_review.DONE_SETTING, ""))
+    done.add(contacts_review.title_key({"title": title}))
+    db.set_setting(contacts_review.DONE_SETTING, contacts_review.dump_done(done))
+
+
+def _contacts_step(chat_id: int, db: Database, data: dict, prefix: str = "") -> tuple[str, list | None]:
+    """Следующая карточка очереди (или итог). Состояние сохраняется здесь же."""
+    keys, i = data["keys"], data["i"]
+    while i < len(keys) and not _contacts_card(db, keys[i]):
+        i += 1                                                  # карточка пропала из среза: идём дальше
+    data = {**data, "i": i}
+    head = (prefix + "\n\n") if prefix else ""
+    if i >= len(keys):
+        db.clear_state(chat_id)
+        return (f"{head}Готово. Заполнено: {data.get('saved', 0)}, убрано в архив: {data.get('deleted', 0)}, "
+                f"пропущено: {data.get('skipped', 0)}. Пропущенные вернутся, когда снова запустишь /contacts.", None)
+    db.set_state(chat_id, "contacts", data)
+    front = _contacts_card(db, keys[i])[1]
+    return head + contacts_review.question(front, i, len(keys)), contacts_review.buttons(keys[i])
+
+
+def _contacts_advance(chat_id: int, db: Database, data: dict, outcome: str, prefix: str) -> tuple[str, list | None]:
+    counters = {"saved": "saved", "deleted": "deleted", "skipped": "skipped"}
+    data = {**data, "i": data["i"] + 1, counters[outcome]: data.get(counters[outcome], 0) + 1}
+    return _contacts_step(chat_id, db, data, prefix)
+
+
+def _contacts_start(chat_id: int, db: Database) -> dict:
+    done = contacts_review.load_done(db.get_setting(contacts_review.DONE_SETTING, ""))
+    keys = contacts_review.build_queue(db.snapshot_items(), done)
+    if not keys:
+        return _reply(chat_id, "Карточек без данных не осталось (или срез пока пустой: запусти синхронизацию на ноутбуке).")
+    text, buttons = _contacts_step(chat_id, db, {"keys": keys, "i": 0, "saved": 0, "deleted": 0, "skipped": 0})
+    return _reply(chat_id, f"Карточек без данных: {len(keys)}. Разбираем по одной, остановиться можно в любой момент.\n\n{text}", buttons)
+
+
+async def _contacts_answer(chat_id: int, update_id: int, text: str, command: str, data: dict, db: Database,
+                           process: Processor) -> dict:
+    key = data["keys"][data["i"]] if data["i"] < len(data["keys"]) else ""
+    card = _contacts_card(db, key) if key else None
+    if not card:
+        reply, buttons = _contacts_step(chat_id, db, data)
+        return _reply(chat_id, reply, buttons)
+    title = str(card[1].get("title", ""))
+    plain = split_private(text)[1]
+    if command == "/skip" or interview.is_non_answer(plain):
+        reply, buttons = _contacts_advance(chat_id, db, data, "skipped", f"Ок, пропустил {title}.")
+        return _reply(chat_id, reply, buttons)
+    content = _wrap(text, lambda t: f"Данные о человеке по имени {title} (карточка, тип person): {t}")
+    response = await _save(db, process, capture_id=f"tgc-{update_id}", content=content, revision=2)
+    _contacts_done_add(db, title)
+    mark = f"🔒 {title}: сохранил без ИИ" if response.get("private") else f"✅ {title}: записал"
+    reply, buttons = _contacts_advance(chat_id, db, data, "saved", mark)
+    return _reply(chat_id, reply, buttons)
+
+
+def _contacts_callback(action: str, key: str, chat_id: int, db: Database, edit, toast) -> dict:
+    state = db.get_state(chat_id)
+    if not state or state[0] != "contacts":
+        return toast("Разбор уже закончен. Начать заново: /contacts")
+    data = state[1]
+    if data["i"] >= len(data["keys"]) or data["keys"][data["i"]] != key:
+        return toast("Эта карточка уже не текущая")
+    card = _contacts_card(db, key)
+    if not card:
+        reply, buttons = _contacts_step(chat_id, db, {**data, "i": data["i"] + 1})
+        return edit(reply, buttons)
+    row_key, front = card
+    title = str(front.get("title", ""))
+    if action == "cs":
+        reply, buttons = _contacts_advance(chat_id, db, data, "skipped", f"⏭ Пропустил {title}.")
+    elif action == "cd":
+        return edit(f"Убрать «{title}» в архив?\nКарточка переедет в папку 3-Архив/Удалённые-контакты, "
+                    "её можно вернуть руками. Из моих списков людей она пропадёт.", contacts_review.confirm_buttons(key))
+    elif action == "cn":
+        reply, buttons = _contacts_step(chat_id, db, data)
+    elif action == "cy":
+        db.enqueue_service(f"archive-{key}", f"archive-{key}.json", contacts_review.archive_payload(front))
+        db.snapshot_delete(row_key)
+        db.forget_person(title)
+        _contacts_done_add(db, title)
+        reply, buttons = _contacts_advance(chat_id, db, data, "deleted", f"🗑 «{title}» уйдёт в архив при следующей выгрузке.")
+    else:                                                       # cq: стоп
+        db.clear_state(chat_id)
+        left = len(data["keys"]) - data["i"]
+        return edit(f"Остановился. Осталось карточек: {left}. Продолжить: /contacts")
+    return edit(reply, buttons)
 
 
 def _minutes_ago(stamp: str | None) -> float:
@@ -977,6 +1083,8 @@ def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict |
 
     if not re.fullmatch(r"[0-9a-f]{12}", key):
         return toast("Не понял кнопку")
+    if action in ("cs", "cd", "cn", "cy", "cq"):
+        return _contacts_callback(action, key, chat_id, db, edit, toast)
     if action == "ok":
         db.set_setting(f"rem_{key}", "done")
         text = "Ок, больше не напомню"

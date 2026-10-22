@@ -214,6 +214,38 @@ def close_note(vault: Path, payload: dict) -> str:
     return "closed"
 
 
+ARCHIVE_DIR = ("3-Архив", "Удалённые-контакты")
+
+
+def archive_note(vault: Path, payload: dict) -> str:
+    """Карточка человека уходит в 3-Архив/Удалённые-контакты (не стирается). Возвращает: archived | not_found | ambiguous | not_person | invalid."""
+    title = str(payload.get("title") or "").strip()
+    if not title or str(payload.get("type") or "") != "person":
+        return "invalid"
+    archive = vault.joinpath(*ARCHIVE_DIR)
+    candidates = [c for c in find_notes(vault, title, str(payload.get("created") or "")) if archive not in c.parents]
+    if not candidates:
+        return "not_found"
+    if len(candidates) > 1:
+        return "ambiguous"
+    path = candidates[0]
+    try:
+        text = _read_text(path)
+        parsed = _front_lines(text)
+        if not parsed or _norm(_front_value(parsed[0], parsed[1], "type")[1]) != "person":
+            return "not_person"
+        target = vault.joinpath(*ARCHIVE_DIR)
+        target.mkdir(parents=True, exist_ok=True)
+        dest, n = target / path.name, 2
+        while dest.exists():
+            dest = target / f"{path.stem} ({n}){path.suffix}"
+            n += 1
+        os.replace(path, dest)
+    except (OSError, UnicodeDecodeError):
+        return "invalid"
+    return "archived"
+
+
 SETTABLE = {"status", "due", "remind_at", "next_due", "event_at", "deadline"}
 
 
@@ -266,17 +298,20 @@ def apply_service(vault: Path, item: dict) -> str:
         return "invalid"
     if payload.get("action") == "set":
         return update_note(vault, payload)
+    if payload.get("action") == "archive":
+        return archive_note(vault, payload)
     if payload.get("action") != "close":
         return "invalid"
     return close_note(vault, payload)
 
 
 SERVICE_RU = {"closed": "дело закрыто", "updated": "срок перенесён", "already": "уже закрыто, пропускаю", "not_found": "заметка не найдена, пропускаю",
-              "ambiguous": "подходит несколько заметок, пропускаю", "invalid": "непонятная запись, пропускаю"}
+              "ambiguous": "подходит несколько заметок, пропускаю", "invalid": "непонятная запись, пропускаю",
+              "archived": "карточка убрана в 3-Архив/Удалённые-контакты", "not_person": "это не карточка человека, не трогаю"}
 
 
 SNAPSHOT_SKIP_DIRS = {"Шаблоны", "Дашборды", ".obsidian", ".trash", "7-Исходники"}
-SNAPSHOT_SKIP_PATHS = ("3-Архив/Люди-дубли",)
+SNAPSHOT_SKIP_PATHS = ("3-Архив/Люди-дубли", "3-Архив/Удалённые-контакты")
 SNAPSHOT_MAX_CHARS = 2_500_000
 _last_snapshot_hash = ""
 

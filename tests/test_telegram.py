@@ -671,3 +671,58 @@ def test_confirmation_can_be_switched_off(tg):
     reply = send(client, update("что-то", uid=34)).json()
     assert "Не уверен" not in reply["text"]
     assert client.get("/pending", headers=auth()).json()["count"] == 1
+
+
+# ---------- /contacts: разбор карточек людей ----------
+
+def _seed_people(client, *fronts):
+    from app.snapshot import to_notes  # noqa: F401
+    db = client.app.state.db if hasattr(client.app.state, "db") else None
+    return db
+
+
+def _post_snapshot(client, cards):
+    corpus = "\n=====NOTE=====\n".join(
+        "---\n" + "\n".join(f"{k}: {v}" for k, v in card.items()) + "\n---\n" for card in cards)
+    return client.post("/snapshot", json={"corpus": corpus, "full": True}, headers=auth())
+
+
+def test_contacts_walkthrough_save_skip_and_archive(tg):
+    client = tg(StubLLM(result(note(type="person", title="Арман", body="сосед", confidence=0.9))))
+    cards = [{"title": "Арман", "type": "person", "phones": "+7 701 000 00 01"},
+             {"title": "Левый контакт", "type": "person"},
+             {"title": "Сергей", "type": "person", "relation": "друг"}]
+    assert _post_snapshot(client, cards).status_code == 200
+    first = send(client, update("/contacts", uid=40)).json()
+    assert "Карточек без данных: 2" in first["text"] and "Арман" in first["text"]
+    assert "Сергей" not in first["text"]                                           # у Сергея роль уже есть
+    saved = send(client, update("сосед по даче", uid=41)).json()
+    assert "Арман: записал" in saved["text"] and "Левый контакт" in saved["text"]
+    assert client.get("/pending", headers=auth()).json()["count"] == 1
+    markup = saved["reply_markup"]["inline_keyboard"]
+    callbacks = [b["callback_data"] for row in markup for b in row]
+    delete = next(c for c in callbacks if c.startswith("cd:"))
+    ask = send(client, {"update_id": 42, "callback_query": {"id": "1", "from": {"id": ME}, "data": delete,
+                        "message": {"message_id": 7, "chat": {"id": ME}}}}).json()
+    assert "Убрать «Левый контакт»" in ask["text"]
+    yes = next(b["callback_data"] for row in ask["reply_markup"]["inline_keyboard"] for b in row if b["callback_data"].startswith("cy:"))
+    done = send(client, {"update_id": 43, "callback_query": {"id": "2", "from": {"id": ME}, "data": yes,
+                         "message": {"message_id": 7, "chat": {"id": ME}}}}).json()
+    assert "уйдёт в архив" in done["text"] and "Готово" in done["text"]
+    service = client.get("/pending?limit=50&service=1", headers=auth()).json()["items"]
+    archives = [i for i in service if '"archive"' in i["markdown"]]
+    assert len(archives) == 1 and "Левый контакт" in archives[0]["markdown"]
+    again = send(client, update("/contacts", uid=44)).json()
+    assert "не осталось" in again["text"]                                           # заполненный и убранный больше не спрашиваем
+
+
+def test_contacts_skip_and_stop(tg):
+    client = tg()
+    _post_snapshot(client, [{"title": "Арман", "type": "person"}, {"title": "Берик", "type": "person"}])
+    send(client, update("/contacts", uid=50))
+    skipped = send(client, update("/skip", uid=51)).json()
+    assert "пропустил" in skipped["text"].lower()
+    stop = send(client, update("стоп", uid=52)).json()
+    assert client.get("/pending", headers=auth()).json()["count"] == 0              # ничего не записано
+    later = send(client, update("/contacts", uid=53)).json()
+    assert "Карточек без данных: 2" in later["text"]                                # пропущенные возвращаются
