@@ -439,23 +439,6 @@ def _homonyms(entries: list[dict], keys: tuple[str, ...] = ("phones", "birthday"
     return False
 
 
-def _merge_short_names(groups: dict[str, list[dict]]) -> None:
-    """Карточка из одного слова («Серик») вливается в единственную полную («Серик Нурланов»), если данные не спорят."""
-    for key in [k for k in groups if " " not in k]:
-        full = [k for k in groups if " " in k and key in k.split()]
-        if len(full) != 1 or key not in groups:
-            continue
-        merged = groups[full[0]] + groups[key]
-        if _homonyms(merged):
-            continue
-        for e in groups[key]:
-            e["label"] = e.get("label") or ""
-            e["plain"], e["desc"] = False, ""
-            e["name"] = groups[full[0]][0]["name"]
-        groups[full[0]] = merged
-        del groups[key]
-
-
 def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
     """Склеивает «Имя» и «Имя — описание» в одну карточку. Дубли не удаляются, а уезжают в 3-Архив/Люди-дубли.
 
@@ -493,7 +476,6 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
     groups: dict[str, list[dict]] = {}
     for e in entries_all:
         groups.setdefault(perm_key(e["name"]), []).append(e)
-    _merge_short_names(groups)
     for entries in groups.values():
         if len(entries) == 1 and not entries[0]["desc"] and entries[0]["plain"]:
             continue

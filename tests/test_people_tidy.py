@@ -120,12 +120,10 @@ def test_tidy_merges_reordered_names(tmp_path):
     assert "+7 700 111 11 11" in text and "Банк" in text
 
 
-def test_tidy_merges_short_name_into_unique_full_name(tmp_path):
-    put(tmp_path, "Серик.md", person("Серик", 'relation: "друг"\n'))
-    put(tmp_path, "Серик Нурланов.md", person("Серик Нурланов", 'phones:\n  - "+7 701 000 00 00"\n'))
-    assert len(vp.tidy(tmp_path)["merged"]) == 1
-    vp.tidy(tmp_path, apply=True)
-    assert [p.name for p in (tmp_path / "1-Люди").glob("*.md")] == ["Серик Нурланов.md"]
+def test_tidy_never_merges_short_name_into_full_name(tmp_path):
+    put(tmp_path, "Ирина.md", person("Ирина"))
+    put(tmp_path, "Ирина Диз Алматы.md", person("Ирина Диз Алматы"))
+    assert vp.tidy(tmp_path)["merged"] == []                      # это могут быть разные Ирины
 
 
 def test_tidy_does_not_merge_short_name_when_two_full_names(tmp_path):
@@ -150,3 +148,19 @@ def test_run_folds_label_and_reordered_names_into_existing_card(tmp_path):
     report = vp.run(tmp_path)
     assert report["created"] == []                                      # «Eichholtz Рабочий» новой карточкой не стала
     assert "+7 700 222 22 22" in (tmp_path / "1-Люди/Eichholtz.md").read_text(encoding="utf-8")
+
+
+def test_ambiguous_first_name_is_not_bound_to_either_person():
+    from app import people as pm
+    known = [{"name": "Ирина Диз Алматы", "aliases": []}, {"name": "Ирина Garbar", "aliases": []}, {"name": "Серик Нурланов", "aliases": []}]
+    index = pm.build_index(known)
+    assert pm.canonical("Ирина", index) == "Ирина"            # не к первой попавшейся
+    assert pm.canonical("Серик", index) == "Серик Нурланов"   # единственный Серик: привязываем
+    assert not pm.is_new("Ирина", index)                        # человек известен, заново не спрашиваем
+
+
+def test_related_must_be_mentioned_in_the_text():
+    from app import people as pm
+    assert pm.mentioned("Идея Декор", "Мебель для Идея Декор, шторы")
+    assert pm.mentioned("Garbar", "Ирина из garbar предложила стулья")
+    assert not pm.mentioned("Идея Декор", "Ирина из Garbar предложила полубарные стулья")

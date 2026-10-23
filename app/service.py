@@ -330,7 +330,9 @@ def build_response(
     new_people: list[str] = []
     for i, raw in enumerate(raw_notes):
         names = [people_module.canonical(n, index) for n in raw.people]
-        raw_notes[i] = raw.model_copy(update={"people": names})
+        source_text = f"{content}\n{clarifications}"
+        related = [r for r in raw.related if people_module.mentioned(str(r), source_text)]    # без выдуманных связей
+        raw_notes[i] = raw.model_copy(update={"people": names, "related": related})
         for name in names:
             if people_module.is_new(name, index) and name not in new_people and not owner_module.is_owner(name):
                 new_people.append(name)
