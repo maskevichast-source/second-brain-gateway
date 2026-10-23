@@ -149,3 +149,15 @@ def test_news_unescapes_html_skips_support_noise_and_fixes_link():
     assert len(items) == 1
     assert '"a@b.com"' in items[0].summary and "&quot;" not in items[0].summary
     assert items[0].link == "https://s.com/i/2"
+
+
+def test_news_skips_github_side_services_but_keeps_actions_and_security():
+    from app import news
+    xml = ("<rss><channel>"
+           "<item><title>Disruption with Dependabot Alerts</title><description>delays</description><link>https://x/1</link></item>"
+           "<item><title>Disruption with Copilot</title><description>x</description><link>https://x/2</link></item>"
+           "<item><title>Delayed Actions status check results</title><description>Actions slow</description><link>https://x/3</link></item>"
+           "<item><title>Unauthorized access to tokens</title><description>rotate credentials Dependabot</description><link>https://x/4</link></item>"
+           "</channel></rss>")
+    titles = [i.title for i in news.parse_feed(xml, "GitHub")]
+    assert titles == ["Delayed Actions status check results", "Unauthorized access to tokens"]

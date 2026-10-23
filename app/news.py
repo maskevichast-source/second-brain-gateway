@@ -18,7 +18,7 @@ from email.utils import parsedate_to_datetime
 import httpx
 
 from .db import Database
-from .textutil import one_line
+from .textutil import one_line, trim_words
 
 logger = logging.getLogger(__name__)
 SEEN_SETTING = "news_seen"
@@ -28,7 +28,8 @@ SECURITY = re.compile(r"security|breach|unauthori[sz]ed|compromis|credential|lea
                       r"взлом|утечк|компромет|ключ|секрет|несанкцион", re.IGNORECASE)
 # Не про работу сервиса: задержки поддержки, биллинг, документация. Такое не присылаем (если не про безопасность).
 NOISE = re.compile(r"customer support|support (?:response|ticket|team)|billing|invoice|documentation|status page|"
-                   r"subscription (?:page|email)", re.IGNORECASE)
+                   r"subscription (?:page|email)|dependabot|copilot|codespaces|discussions|gists?\b|github pages|sponsors|"
+                   r"marketplace|notifications?\b|degraded performance for (?:issues|pull requests) search", re.IGNORECASE)
 
 
 def _clean(text: str, limit: int) -> str:
@@ -147,7 +148,7 @@ def format_item(item: NewsItem) -> str:
     icon = "🔴 Безопасность" if item.critical else "ℹ️ Сбой сервиса"
     text = f"{icon}: {item.source}\n{item.title}"
     if item.summary and item.summary != item.title:
-        text += f"\n{item.summary[:300]}"
+        text += f"\n{trim_words(item.summary, 220)}"
     if item.critical:
         text += "\n\nЕсли это про ключи или токены: замени их у провайдера и в Railway."
     if item.link:
