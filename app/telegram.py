@@ -22,6 +22,7 @@ from . import contacts_review
 from . import owner as owner_module
 from . import people_links as people_links_module
 from . import diary, interview
+from . import dedupe as dedupe_module
 from . import filebox as filebox_module
 from . import jarvis as jarvis_module
 from . import when as when_module
@@ -140,6 +141,8 @@ def _task_action(chat_id: int, action: str, rest: str, db: Database, now) -> dic
 
 def _summary(response: dict) -> str:
     files = response.get("files", [])
+    if response.get("deduped") and not files:
+        return "♻️ Это уже записано: " + "; ".join(f"«{t}»" for t in response["deduped"][:3]) + ". Второй раз не заводил."
     if response.get("count", 1) == 0:
         return "🤷 Сохранять нечего: конкретных фактов не нашёл."
     if response.get("private"):
@@ -277,6 +280,12 @@ async def _save(db: Database, process: Processor, *, capture_id: str, content: s
     if not response.get("needs_review") or revision != 1:
         sources = sources_module.CURRENT.get()
         files = response["files"]
+        try:
+            files, dropped = dedupe_module.drop_repeats(files, db.snapshot_items(), bool(sources))
+            if dropped:
+                response["files"], response["deduped"] = files, dropped
+        except Exception as exc:  # noqa: BLE001 — защита от повторов не должна терять запись
+            logger.warning("telegram: проверка повторов не удалась (%s)", type(exc).__name__)
         if sources and files:
             planned = sources_module.plan(sources, capture_id, files[0]["filename"][:10])
             for f in files:
@@ -337,6 +346,34 @@ _QUESTION_START = re.compile(
     r"(?:когда|что|кто|где|куда|откуда|сколько|какой|какая|какое|какие|каков\w*|чей|чья|чьё|чьи|кому|кого|у кого|с кем|"
     r"во сколько|на когда|до скольки|есть ли|был ли|была ли|было ли|были ли|помнишь|почему|зачем|как зовут|как называется)(?![\w-])")
 _SAVE_AS_NOTE = re.compile(r"(?i)^(сохрани|запиши|запомни)(\s+(это|как есть|как заметку))?\W*$")
+
+
+ASK_CONTEXT_MINUTES = 15
+_PRONOUN = re.compile(r"(?i)\b(он|она|оно|они|его|её|ее|их|ему|ей|им|там|туда|тут|это|этот|эта|эти|тот|та|те|тогда|потом)\b")
+
+
+def is_followup(text: str) -> bool:
+    """Короткое уточнение к прошлому вопросу: «а во сколько?», «с кем я иду?», «где это?», «и сколько стоит?»."""
+    text = text.strip()
+    if not text or len(text) > 70 or "\n" in text or text.startswith("/"):
+        return False
+    return bool(re.match(r"(?i)^(а|и|ну)\b", text) or _PRONOUN.search(text) or len(text.split()) <= 4)
+
+
+def _ask_context(db, chat_id: int, now) -> dict | None:
+    import json
+    try:
+        data = json.loads(db.get_setting(f"askctx_{chat_id}", "") or "{}")
+        asked = datetime.fromisoformat(data["at"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return data if 0 <= (now - asked).total_seconds() <= ASK_CONTEXT_MINUTES * 60 else None
+
+
+def _remember_ask(db, chat_id: int, question: str, answer: str, now) -> None:
+    import json
+    answer = answer.split("\n\nИсточники:")[0]
+    db.set_setting(f"askctx_{chat_id}", json.dumps({"q": question[:300], "a": one_line(answer, 400), "at": now.isoformat()}, ensure_ascii=False))
 
 
 def is_question(text: str) -> bool:
@@ -400,7 +437,9 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         if saved_q and _SAVE_AS_NOTE.match(text):                      # «сохрани»: прошлая фраза была записью, а не вопросом
             db.set_setting(f"lastq_{chat_id}", "")
             text = saved_q
-        elif not db.get_state(chat_id) and not db.get_waiting(chat_id) and is_question(text):
+        elif not db.get_state(chat_id) and not db.get_waiting(chat_id) and (
+                is_question(text) or (text.rstrip().endswith("?") and len(text) <= 70 and _ask_context(db, chat_id, now)
+                                      and not text.startswith(("Переслано от", "!")))):
             free_question = text
             command, text = "/ask", "/ask " + text
     if command in ("/ask", "/day", "/tasks", "/import", "/week", "/brief", "/who", "/person", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
@@ -415,7 +454,14 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             return _reply(chat_id, "Напиши вопрос после команды, например: /ask что я обещал Серику?")
         if command in ("/brief", "/who", "/person") and not arg:
             return _reply(chat_id, "О ком? Например: /person Серик")
+        asked_plain = arg
+        if command == "/ask":
+            ctx = _ask_context(db, chat_id, now)
+            if ctx and is_followup(arg):
+                arg = f"{arg} (уточнение к прошлому вопросу «{ctx['q']}», на него я ответил: {ctx['a']})"
         result = await secretary(command[1:], arg[:1000])
+        if command == "/ask" and isinstance(result, str):
+            _remember_ask(db, chat_id, asked_plain, result, now)
         if free_question and isinstance(result, str):
             if "Источники:" in result:
                 db.set_setting(f"lastq_{chat_id}", "")

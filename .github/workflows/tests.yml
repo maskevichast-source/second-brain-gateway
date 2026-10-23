@@ -1,0 +1,16 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements-dev.txt
+      - run: python -m compileall -q app tools
+      - run: python -m pytest -q
+        env:
+          DEEPSEEK_API_KEY: test-key
+          CAPTURE_TOKEN: test-token-test-token-test-token-00

@@ -259,3 +259,56 @@ def test_file_sent_with_a_note_is_remembered_by_note_title(tg, tmp_path):
     send(client, _doc_message(330, "Билет на Щелкунчик", "F-NOTE"))
     sent = send(client, update("вышли билет на щелкунчик", uid=331)).json()
     assert sent["method"] == "sendDocument" and sent["document"] == "F-NOTE"
+
+
+# ---------- повторы ----------
+
+def test_identical_event_and_task_are_not_saved_twice(tg, tmp_path):
+    from app.snapshot import rows_from_markdown
+    ev = result(llm_note(type="event", status="запланировано", title="Щелкунчик", body="x", fields={"event_at": "2026-12-05T18:00"}))
+    client = tg(StubLLM(ev))
+    _db(tmp_path).snapshot_put(rows_from_markdown(note("Щелкунчик в театре", "event", status="запланировано", event_at="2026-12-05T18:00")))
+    first = send(client, update("щелкунчик 5 декабря в 18:00", uid=400)).json()["text"]
+    assert "Щелкунчик" in first
+    other_day = result(llm_note(type="event", status="запланировано", title="Щелкунчик в театре", body="x", fields={"event_at": "2026-12-06T18:00"}))
+    client2 = tg(StubLLM(other_day))
+    assert "уже записано" not in send(client2, update("щелкунчик 6 декабря", uid=401)).json()["text"]
+
+
+def test_repeat_check_skips_notes_with_sources_and_private(tmp_path):
+    from app import dedupe
+    from app.snapshot import rows_from_markdown
+    items = rows_from_markdown(note("Приём у врача", "event", status="запланировано", event_at="2026-11-02T10:00"))
+    new = {"filename": "a.md", "markdown": note("Приём у врача", "event", status="запланировано", event_at="2026-11-02T10:00").replace("2026-10-20T10:00", "2026-10-24T03:00")}
+    assert dedupe.drop_repeats([new], items, has_sources=False)[1] == ["Приём у врача"]
+    assert dedupe.drop_repeats([new], items, has_sources=True) == ([new], [])
+    task = {"filename": "t.md", "markdown": note("Позвонить сестре", "task", status="открыто", due="2026-11-02T10:00").replace("2026-10-20T10:00", "2026-10-24T03:00")}
+    same = rows_from_markdown(note("Позвонить сестре", "task", status="открыто", due="2026-11-02T10:00"))
+    assert dedupe.drop_repeats([task], same, has_sources=False)[1] == ["Позвонить сестре"]
+    nodue = {"filename": "t2.md", "markdown": note("Позвонить сестре", "task", status="открыто").replace("2026-10-20T10:00", "2026-10-24T03:00")}
+    assert dedupe.drop_repeats([nodue], same, has_sources=False)[1] == []                  # без срока не считаем повтором
+
+
+def test_followup_question_gets_previous_answer_as_context(tg, tmp_path):
+    from app.snapshot import rows_from_markdown
+    seen = []
+
+    async def ask_stub(settings, **kwargs):
+        seen.append(kwargs["question"])
+        return {"answer": "Щелкунчик 5 декабря в 18:00.", "used": [1]}
+
+    client = tg(StubLLM(result(llm_note(type="note", title="x", body="x", confidence=0.9))), ask_llm=ask_stub)
+    _db(tmp_path).snapshot_put(rows_from_markdown(note("Щелкунчик", "event", event_at="2026-12-05T18:00")))
+    send(client, update("когда щелкунчик?", uid=410))
+    send(client, update("а во сколько?", uid=411))
+    assert "уточнение к прошлому вопросу «когда щелкунчик?»" in seen[1] and "5 декабря" in seen[1]
+    assert "уточнение" not in seen[0]
+    send(client, update("где там парковка?", uid=412))
+    assert "щелкунчик" in seen[2].lower()
+
+
+def test_followup_detection():
+    from app.telegram import is_followup
+    for t in ("а во сколько?", "с кем я иду?", "где это?", "и сколько стоит", "парковка есть?"):
+        assert is_followup(t), t
+    assert not is_followup("когда у меня встреча с Сериком и Арманом по поводу ремонта на следующей неделе в офисе?")
