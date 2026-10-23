@@ -955,7 +955,7 @@ async def _attachment(message: dict, settings: Settings, fetcher, vision) -> tup
         truncated = len(text) > len(cut)
         content = head + cut + ("\n\n(текст PDF обрезан)" if truncated else "")
         content = "! " + content if private else content
-        notice = f"📄 Прочитал PDF «{name or 'без имени'}»: {len(cut)} симв." + (", остальное обрезал." if truncated else ".")
+        notice = f"📄 Прочитал PDF «{name or 'без имени'}»: {len(cut)} симв" + (", остальное обрезал." if truncated else ".")
         return {**message, "text": content, "caption": None, "document": None}, notice
     is_image = bool(message.get("photo")) or mime.startswith("image/")
     if not is_image:

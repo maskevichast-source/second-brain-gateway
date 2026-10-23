@@ -164,3 +164,48 @@ def test_related_must_be_mentioned_in_the_text():
     assert pm.mentioned("Идея Декор", "Мебель для Идея Декор, шторы")
     assert pm.mentioned("Garbar", "Ирина из garbar предложила стулья")
     assert not pm.mentioned("Идея Декор", "Ирина из Garbar предложила полубарные стулья")
+
+
+def _inbox(tmp_path, name, text):
+    folder = tmp_path / "0-Inbox"
+    folder.mkdir(exist_ok=True)
+    (folder / name).write_text(text, encoding="utf-8")
+
+
+def test_tidy_archives_inbox_person_notes_after_moving_data_to_card(tmp_path):
+    put(tmp_path, "Ерасыл.md", person("Ерасыл"))
+    _inbox(tmp_path, "a.md", person("Ерасыл", 'company: "Банк"\n'))
+    _inbox(tmp_path, "b.md", person("Ерасыл", 'phones:\n  - "+7 700 000 11 22"\n'))
+    plan = vp.tidy(tmp_path)
+    assert sorted(plan["folded"]) == ["0-Inbox/a.md", "0-Inbox/b.md"]
+    assert (tmp_path / "0-Inbox/a.md").exists()                          # план ничего не двигает
+    vp.tidy(tmp_path, apply=True)
+    card = (tmp_path / "1-Люди/Ерасыл.md").read_text(encoding="utf-8")
+    assert "Банк" in card and "+7 700 000 11 22" in card                 # данные не потеряны
+    assert not (tmp_path / "0-Inbox/a.md").exists() and (tmp_path / "3-Архив/Люди-дубли/a.md").exists()
+
+
+def test_tidy_creates_card_for_duplicate_inbox_notes_without_card(tmp_path):
+    _inbox(tmp_path, "a.md", person("Булат Газизович", 'company: "УК"\n'))
+    _inbox(tmp_path, "b.md", person("Булат Газизович", 'phones:\n  - "+7 701 111 22 33"\n'))
+    vp.tidy(tmp_path, apply=True)
+    card = (tmp_path / "1-Люди/Булат Газизович.md").read_text(encoding="utf-8")
+    assert "УК" in card and "+7 701 111 22 33" in card
+    assert len(list((tmp_path / "3-Архив/Люди-дубли").glob("*.md"))) == 2
+
+
+def test_tidy_keeps_single_inbox_person_note_without_card(tmp_path):
+    _inbox(tmp_path, "a.md", person("Один Человек"))
+    plan = vp.tidy(tmp_path)
+    assert plan["folded"] == []
+    vp.tidy(tmp_path, apply=True)
+    assert (tmp_path / "0-Inbox/a.md").exists()
+
+
+def test_tidy_folds_label_person_notes_into_base_card(tmp_path):
+    put(tmp_path, "Eichholtz.md", person("Eichholtz"))
+    _inbox(tmp_path, "w.md", person("Eichholtz Рабочий", 'phones:\n  - "+7 700 222 22 22"\n'))
+    vp.tidy(tmp_path, apply=True)
+    assert "+7 700 222 22 22" in (tmp_path / "1-Люди/Eichholtz.md").read_text(encoding="utf-8")
+    assert not (tmp_path / "0-Inbox/w.md").exists()
+    assert not (tmp_path / "1-Люди/Eichholtz Рабочий.md").exists()

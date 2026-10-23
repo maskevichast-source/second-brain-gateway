@@ -439,15 +439,41 @@ def _homonyms(entries: list[dict], keys: tuple[str, ...] = ("phones", "birthday"
     return False
 
 
+def _fold_person_notes(vault: Path, card_keys: set[str], apply: bool) -> list[str]:
+    """Заметки типа person вне 1-Люди (их плодит бот при каждом ответе про человека). Их данные уже переносятся в карточку
+    (`run`), поэтому когда карточка есть или таких заметок о человеке несколько, они уезжают в 3-Архив/Люди-дубли.
+    Одинокая заметка о человеке без карточки остаётся на месте. Ничего не удаляется."""
+    notes = []
+    for path, front in read_notes(vault):
+        rel = path.relative_to(vault)
+        if rel.parts[0] == PEOPLE_DIR or str(front.get("type")) != "person":
+            continue
+        name = safe_name(split_title(str(front.get("title") or path.stem))[0])
+        if name:
+            base = strip_label(name)
+            key = perm_key(base) if perm_key(base) in card_keys else perm_key(name)
+            notes.append((path, rel, key))
+    counts: dict[str, int] = {}
+    for _, _, key in notes:
+        counts[key] = counts.get(key, 0) + 1
+    folded = []
+    for path, rel, key in notes:
+        if key in card_keys or counts[key] >= 2:
+            folded.append(rel.as_posix())
+            if apply:
+                archive = vault / Path(DUP_DIR)
+                archive.mkdir(parents=True, exist_ok=True)
+                path.replace(_unique(archive, path.name))
+    return folded
+
+
 def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
     """Склеивает «Имя» и «Имя — описание» в одну карточку. Дубли не удаляются, а уезжают в 3-Архив/Люди-дубли.
 
     Без apply только описывает, что будет сделано. Похожие, но не совпадающие имена (опечатки) только перечисляются.
     """
-    report = {"merged": [], "renamed": [], "moved": [], "similar": [], "foreign": [], "homonyms": []}
+    report = {"merged": [], "renamed": [], "moved": [], "similar": [], "foreign": [], "homonyms": [], "folded": []}
     folder = vault / PEOPLE_DIR
-    if not folder.is_dir():
-        return report
     entries_all: list[dict] = []
     for path in sorted(folder.glob("*.md")):
         try:
@@ -525,6 +551,10 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
             if _norm_name(a) != _norm_name(b) and " " in a and " " in b \
                     and difflib.SequenceMatcher(None, _norm_name(a), _norm_name(b)).ratio() >= 0.88:
                 report["similar"].append(f"{a} / {b}")
+    if apply:
+        run(vault)                                             # данные заметок о людях сначала переносятся в карточки
+    card_keys = set(groups)                                    # карточки, которые уже были (до переноса данных)
+    report["folded"] = _fold_person_notes(vault, card_keys, apply)
     return report
 
 
@@ -597,6 +627,7 @@ def main(argv=None) -> int:
         plan = tidy(vault, apply=args.apply)
         print(("Сделано:" if args.apply else "План (ничего не изменено, добавь --apply):"))
         for key, title in (("merged", "склеено"), ("renamed", "переименовано"), ("similar", "похожие имена, проверь руками"), ("homonyms", "тёзки (разные телефоны/компания), не склеены"),
+                           ("folded", "заметка о человеке уходит в 3-Архив/Люди-дубли (данные уже в карточке)"),
                            ("foreign", "не карточка человека, лежит в 1-Люди")):
             for row in plan[key]:
                 print(f"  {title}: {row}")
