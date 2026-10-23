@@ -127,7 +127,7 @@ def test_radar_buttons_for_overdue_people(tmp_path):
 
 # ---------- через Telegram ----------
 
-from .conftest import StubLLM, result  # noqa: E402
+from .conftest import StubLLM, auth, result  # noqa: E402
 from .conftest import note as llm_note  # noqa: E402
 from .test_telegram import ME, send, tg, update  # noqa: E402,F401
 
@@ -207,3 +207,55 @@ def test_free_question_goes_to_ask_and_save_fallback(tg, tmp_path):
     assert "ответь «сохрани»" in second
     saved = send(client, update("сохрани", uid=202)).json()["text"]
     assert "Мысль про стулья" in saved or "Записал" in saved
+
+
+# ---------- «вышли файл» ----------
+
+def test_file_request_detection():
+    from app import filebox
+    for q in ("Вышли мне файл билета", "пришли договор с мебельщиками", "отправь скан паспорта", "скинь чек на пылесос", "покажи билет"):
+        assert filebox.is_request(q), q
+    for t in ("Выслать файл билета Диане завтра", "когда щелкунчик?", "купить билет", "скинь контакт Серика", "/ask вышли файл"):
+        assert not filebox.is_request(t), t
+
+
+def _doc_message(uid, caption, file_id, name="ticket.pdf"):
+    return {"update_id": uid, "message": {"message_id": uid, "from": {"id": ME, "first_name": "Влад"}, "chat": {"id": ME, "type": "private"},
+            "date": 0, "caption": caption, "document": {"file_id": file_id, "file_name": name, "mime_type": "application/octet-stream", "file_size": 1000}}}
+
+
+def test_remember_file_only_and_send_it_back(tg, tmp_path):
+    client = tg(StubLLM(result(llm_note(type="task", title="Не должно появиться", body="x", confidence=0.9))))
+    reply = send(client, _doc_message(300, "Билет Щелкунчик 5 декабря, только файл", "FILE-ID-1")).json()
+    assert "Запомнил файл" in reply["text"] and "Заметку не создавал" in reply["text"]
+    assert client.get("/pending", headers=auth()).json()["count"] == 0          # заметка не создавалась
+    sent = send(client, update("Вышли мне файл билета на щелкунчик", uid=301)).json()
+    assert sent["method"] == "sendDocument" and sent["document"] == "FILE-ID-1" and "Щелкунчик" in sent["caption"]
+    none = send(client, update("вышли договор с мебельщиками", uid=302)).json()
+    assert none["method"] == "sendMessage" and "ничего похожего" in none["text"]            # не превращается в дело
+
+
+def test_file_request_with_several_matches_offers_buttons(tg, tmp_path):
+    client = tg(StubLLM(result(llm_note(type="note", title="x", body="x", confidence=0.9))))
+    send(client, _doc_message(310, "Билет Щелкунчик, только файл", "F-A"))
+    send(client, _doc_message(311, "Билет Алмата вылет, только файл", "F-B", name="flight.pdf"))
+    reply = send(client, update("пришли файл билета", uid=312)).json()
+    assert reply["method"] == "sendMessage" and "несколько" in reply["text"]
+    data = [b["callback_data"] for row in reply["reply_markup"]["inline_keyboard"] for b in row]
+    got = send(client, {"update_id": 313, "callback_query": {"id": "313", "from": {"id": ME}, "data": data[0],
+               "message": {"message_id": 5, "chat": {"id": ME}}}}).json()
+    assert got["method"] == "sendDocument" and got["document"] in ("F-A", "F-B")
+
+
+def test_private_files_are_not_remembered(tg, tmp_path):
+    from app import filebox
+    client = tg(StubLLM(result(llm_note(type="note", title="x", body="x", confidence=0.9))))
+    send(client, _doc_message(320, "! личный документ", "F-PRIV"))
+    assert filebox.search(_db(tmp_path), "личный документ") == []
+
+
+def test_file_sent_with_a_note_is_remembered_by_note_title(tg, tmp_path):
+    client = tg(StubLLM(result(llm_note(type="document", title="Билет на Щелкунчик", body="Билет", confidence=0.9))))
+    send(client, _doc_message(330, "Билет на Щелкунчик", "F-NOTE"))
+    sent = send(client, update("вышли билет на щелкунчик", uid=331)).json()
+    assert sent["method"] == "sendDocument" and sent["document"] == "F-NOTE"

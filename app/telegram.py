@@ -22,6 +22,7 @@ from . import contacts_review
 from . import owner as owner_module
 from . import people_links as people_links_module
 from . import diary, interview
+from . import filebox as filebox_module
 from . import jarvis as jarvis_module
 from . import when as when_module
 from . import sources as sources_module
@@ -281,6 +282,8 @@ async def _save(db: Database, process: Processor, *, capture_id: str, content: s
             for f in files:
                 f["markdown"] = sources_module.attach(f["markdown"], planned)
             db.enqueue_files(capture_id, planned)
+            if not response.get("private"):
+                filebox_module.remember(db, sources, files[0]["title"], datetime.now(timezone.utc).date().isoformat())
         try:
             items = db.snapshot_items()
             for f in files:
@@ -382,6 +385,15 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             current = db.get_state(chat_id)
             if current and current[0] in ("interview", "person", "diary", "contacts", "purchase"):
                 command, text = "/stop", "/stop"
+    if not command and not db.get_state(chat_id) and not db.get_waiting(chat_id) and filebox_module.is_request(text):
+        found = filebox_module.search(db, text)
+        if not found:
+            return _reply(chat_id, "Среди файлов, которые ты присылал мне, ничего похожего не нашёл. Файлы, присланные раньше, я не "
+                                   "запоминал: перешли нужное сообщение с файлом боту ещё раз с подписью «…, только файл», и я его "
+                                   "запомню, не создавая заметку.")
+        if len(found) == 1:
+            return filebox_module.send_method(chat_id, found[0])
+        return _reply(chat_id, "Нашёл несколько файлов. Какой прислать?", filebox_module.pick_buttons(found))
     free_question = ""
     if not command and secretary is not None:
         saved_q = db.get_setting(f"lastq_{chat_id}", "")
@@ -419,6 +431,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         return await _diary_command(chat_id, update_id, text, settings, db, process, now)
     if command == "/forget":
         removed = db.snapshot_clear()
+        filebox_module.forget(db)
         return _reply(chat_id, f"Стёр срез хранилища на сервере ({removed} записей) и кэш последних ответов. Новые записи снова попадут в него; "
                                "полную копию вернёт шорткат «Синхронизировать».")
     if command == "/sync":
@@ -970,6 +983,13 @@ async def _answer(message: dict, chat_id: int, update_id, *, settings: Settings,
                   vision=None) -> dict:
     """Вложения читаются (PDF, картинки), затем обычная обработка; к ответу добавляется честная пометка."""
     sources, too_big = sources_module.collect(message)
+    own_caption = (message.get("caption") or message.get("text") or "").strip()
+    if sources and filebox_module.ONLY_FILE.search(own_caption):
+        title = filebox_module.ONLY_FILE.sub("", own_caption).strip() or str(sources[0].get("name") or "файл")
+        added = filebox_module.remember(db, sources, title, datetime.now(timezone.utc).date().isoformat())
+        sources_module.CURRENT.set([])
+        return _reply(chat_id, f"📎 Запомнил файл «{title}»: напиши «вышли {title.split()[0].lower()}», и я пришлю его. Заметку не создавал."
+                      if added else "Этот файл я уже запоминал.")
     sources_module.CURRENT.set(sources if not (message.get("text") or message.get("caption") or "").strip().startswith("/") else [])
     message, notice = await _attachment(message, settings, file_fetcher, vision)
     if sources_module.CURRENT.get():
@@ -1332,6 +1352,9 @@ def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict |
         return _contacts_callback(action, key, chat_id, db, edit, toast)
     if action in ("pc", "pq", "pf"):
         return _person_callback(action, key, chat_id, db, now, edit, toast)
+    if action == "fb":
+        item = filebox_module.find_by_key(db, key)
+        return filebox_module.send_method(chat_id, item) if item else toast("Файл уже не в списке")
     if action in ("eo", "en", "ex", "es"):
         return _event_callback(action, key, chat_id, db, now, edit, toast)
     if action == "ok":
