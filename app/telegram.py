@@ -586,7 +586,10 @@ async def _contacts_answer(chat_id: int, update_id: int, text: str, command: str
     if command == "/skip" or interview.is_non_answer(plain):
         reply, buttons = _contacts_advance(chat_id, db, data, "skipped", f"Ок, пропустил {title}.")
         return _reply(chat_id, reply, buttons)
-    content = _wrap(text, lambda t: f"Данные о человеке по имени {title} (карточка, тип person): {t}")
+    known = contacts_review.describe(card[1])
+    known_part = f" Уже известно из карточки: {known}. Эти данные (телефон, компанию, почту) обязательно перенеси в заметку." \
+        if known != "в карточке только имя" else ""
+    content = _wrap(text, lambda t: f"Данные о человеке по имени {title} (карточка, тип person).{known_part} Ответ владельца: {t}")
     response = await _save(db, process, capture_id=f"tgc-{update_id}", content=content, revision=2)
     _contacts_done_add(db, title)
     mark = f"🔒 {title}: сохранил без ИИ" if response.get("private") else f"✅ {title}: записал"

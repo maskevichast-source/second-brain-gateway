@@ -137,3 +137,15 @@ def test_news_feed_parsing_first_run_and_dedupe(tmp_path):
     assert "🔴 Безопасность" in news.format_item(first[0])
     broken = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500)))
     assert asyncio.run(news.fetch_new(db, [("Railway", "https://x/feed")], now, broken)) == []   # сбой ленты молча
+
+
+def test_news_unescapes_html_skips_support_noise_and_fixes_link():
+    from app import news
+    xml = ("<rss><channel>"
+           "<item><title>Delays in customer support responses</title><description>x</description><link>https://s.com//i/1</link></item>"
+           "<item><title>Elevated errors</title><description>Mail &amp;quot;a@b.com&amp;quot; ok</description>"
+           "<link>https://s.com//i/2</link></item></channel></rss>")
+    items = news.parse_feed(xml, "OpenAI")
+    assert len(items) == 1
+    assert '"a@b.com"' in items[0].summary and "&quot;" not in items[0].summary
+    assert items[0].link == "https://s.com/i/2"

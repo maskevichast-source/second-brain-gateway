@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -25,6 +26,18 @@ MAX_SEEN = 600
 MAX_ITEM_BYTES = 400_000
 SECURITY = re.compile(r"security|breach|unauthori[sz]ed|compromis|credential|leak|exposed|rotate|secrets?|api key|"
                       r"взлом|утечк|компромет|ключ|секрет|несанкцион", re.IGNORECASE)
+# Не про работу сервиса: задержки поддержки, биллинг, документация. Такое не присылаем (если не про безопасность).
+NOISE = re.compile(r"customer support|support (?:response|ticket|team)|billing|invoice|documentation|status page|"
+                   r"subscription (?:page|email)", re.IGNORECASE)
+
+
+def _clean(text: str, limit: int) -> str:
+    text = html.unescape(html.unescape(re.sub(r"<[^>]+>", " ", text or "")))     # &quot; и &amp;quot;
+    return one_line(text, limit)
+
+
+def _fix_link(link: str) -> str:
+    return re.sub(r"(?<!:)/{2,}", "/", link or "")
 
 
 @dataclass(frozen=True)
@@ -76,12 +89,14 @@ def parse_feed(xml_text: str, source: str) -> list[NewsItem]:
                 fields.setdefault("link", child.get("href") or (child.text or "").strip())
             else:
                 fields.setdefault(name, (child.text or "").strip())
-        title = one_line(re.sub(r"<[^>]+>", " ", fields.get("title", "")), 160)
+        title = _clean(fields.get("title", ""), 160)
         if not title:
             continue
-        summary = one_line(re.sub(r"<[^>]+>", " ", fields.get("description") or fields.get("summary") or fields.get("content") or ""), 400)
+        summary = _clean(fields.get("description") or fields.get("summary") or fields.get("content") or "", 400)
         uid = fields.get("guid") or fields.get("id") or fields.get("link") or title
-        items.append(NewsItem(f"{source}|{uid}", source, title, fields.get("link", ""),
+        if NOISE.search(f"{title} {summary}") and not SECURITY.search(f"{title} {summary}"):
+            continue
+        items.append(NewsItem(f"{source}|{uid}", source, title, _fix_link(fields.get("link", "")),
                               _date(fields.get("pubDate") or fields.get("published") or fields.get("updated")), summary))
     return items
 
