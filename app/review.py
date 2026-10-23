@@ -189,7 +189,48 @@ def build_brief(notes: list[VaultNote], person: str, now: datetime, ada_text: st
             out.append(f"• {n.title}" + (f" (до {fmt_date(date.fromisoformat(due))})" if due else "")
                        + mark + (" — жду ответа" if str(n.get("status")) == "ждёт" else ""))
 
-    others = [n for n in related if n.type not in ("interaction", "task", "person")]
+    events = [n for n in related if n.type == "event" and str(n.get("status")) not in ("отменено",)]
+    upcoming = sorted((n for n in events if (parse_date(n.get("event_at")) or "0") >= today.isoformat()),
+                      key=lambda n: str(n.get("event_at")))
+    past = sorted((n for n in events if (parse_date(n.get("event_at")) or "9999") < today.isoformat()),
+                  key=lambda n: str(n.get("event_at")), reverse=True)
+    if upcoming:
+        out += ["", "Ближайшие события:"] + [
+            f"• {fmt_date(date.fromisoformat(parse_date(n.get('event_at'))))}: {n.title}"
+            + (f" ({one_line(str(n.get('location')), 40)})" if n.get("location") else "") for n in upcoming[:4]]
+    if past:
+        out += ["", "Были вместе:"] + [
+            f"• {fmt_date(date.fromisoformat(parse_date(n.get('event_at'))))}: {n.title}" for n in past[:3]]
+
+    gifts_for = [n for n in notes if n.type == "product" and low in [x.lower() for x in as_list(n.get("for_whom"))]
+                 and str(n.get("status")) not in ("куплено", "отменено", "не нужно")]
+    if gifts_for:
+        out += ["", "Купить или подарить:"] + [
+            f"• {n.title}" + (f" (до {fmt_date(date.fromisoformat(parse_date(n.get('deadline'))))})" if parse_date(n.get("deadline")) else "")
+            for n in gifts_for[:5]]
+
+    papers = [n for n in notes if n.type in ("document", "case") and (
+        low in [x.lower() for x in as_list(n.get("counterparty"))] or any(low == p.lower() for p in n.people))]
+    if papers:
+        out += ["", "Документы и дела:"] + [
+            f"• {n.title} [{TYPES[n.type].name.lower()}]"
+            + (f" до {fmt_date(date.fromisoformat(parse_date(n.get('valid_until'))))}" if parse_date(n.get("valid_until")) else "")
+            for n in papers[:5]]
+
+    if card:
+        orbit = str(card.get("orbit")).strip()
+        try:
+            cadence = int(float(str(card.get("cadence_days")))) if str(card.get("cadence_days")).strip() else ORBIT_DAYS.get(orbit)
+        except ValueError:
+            cadence = ORBIT_DAYS.get(orbit)
+        seen = [parse_date(card.get("last_contact"))] + [n.created[:10] for n in contacts[:1]]
+        seen = [d for d in seen if d]
+        if cadence and seen:
+            nxt = date.fromisoformat(max(seen)) + timedelta(days=cadence)
+            out += ["", f"Следующий контакт: до {fmt_date(nxt)}" + (" (просрочен)" if nxt < today else "")]
+
+    shown = {id(n) for n in contacts + tasks + events + gifts_for + papers}
+    others = [n for n in related if id(n) not in shown and n.type not in ("interaction", "task", "person")]
     if others:
         out += ["", "Ещё в заметках:"] + [
             f"• {n.title} [{TYPES[n.type].name.lower() if n.type in TYPES else n.type}]" for n in others[:6]]
@@ -206,7 +247,7 @@ ORBITS = {"0": "семья", "1": "ближний", "2": "соратники", "
 ORBIT_DAYS = {"0": 3, "1": 14, "2": 30, "3": 90, "4": 180}
 
 
-def build_radar(notes: list[VaultNote], today: date, limit: int = 10) -> str:
+def build_radar(notes: list[VaultNote], today: date, limit: int = 10, names_out: list | None = None) -> str:
     """Люди из кругов, с кем контакт просрочен. Срок: cadence_days в карточке или по кругу (0: 3 дня … 4: 180)."""
     last: dict[str, date] = {}
     for n in notes:
@@ -238,6 +279,8 @@ def build_radar(notes: list[VaultNote], today: date, limit: int = 10) -> str:
         return "Радар чист: все, кому ты задал круг или срок, на связи вовремя. Круг задаётся в карточке полем orbit (0–4) или cadence_days."
     rows.sort(reverse=True)
     out = ["Давно не общались:"]
+    if names_out is not None:
+        names_out.extend(r[1] for r in rows[:limit])
     for _, name, orbit, cadence, age in rows[:limit]:
         when = "контактов не записано" if age is None else f"{age} дн. назад"
         circle = f", круг «{ORBITS[orbit]}»" if orbit in ORBITS else ""

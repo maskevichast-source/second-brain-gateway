@@ -20,6 +20,7 @@ from . import jarvis as jarvis_module
 from . import monitor
 from . import news as news_module
 from . import owner as owner_module
+from . import people_links as people_links_module
 from . import review as review_module
 from . import snapshot as snapshot_module
 from .config import Settings
@@ -148,6 +149,13 @@ async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
             buttons = reminder_buttons(key, note_key, now)
             if await broadcast(text, buttons):
                 db.set_setting(f"rem_{key}", "sent")
+            sent += len(chats)
+
+    # после события с людьми: «как прошло?» с кнопками (один раз)
+    if cfg["rem_on"] and notes and not jarvis_module.is_quiet(now):
+        for row_key, text, flag in people_links_module.due_followups(items, db, now)[:2]:
+            if await broadcast(text, people_links_module.followup_buttons(row_key)):
+                db.set_setting(flag, "1")
             sent += len(chats)
 
     # Джарвис: крупные покупки и доходы из таблицы трат «Ады»

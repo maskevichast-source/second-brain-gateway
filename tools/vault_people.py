@@ -233,6 +233,18 @@ def _norm_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.casefold().replace("ё", "е")).strip()
 
 
+PHONE_LABELS = frozenset({"рабочий", "рабочая", "рабочее", "домашний", "домашняя", "мобильный", "мобильная", "личный",
+                          "личная", "work", "home", "mobile", "cell", "office", "офис", "основной", "основная", "доп"})
+
+
+def strip_label(name: str) -> str:
+    """«Eichholtz Рабочий» -> «Eichholtz» (метка номера телефона из контактов)."""
+    words = name.split()
+    while len(words) > 1 and (_norm_name(words[-1]) in PHONE_LABELS or words[-1].isdigit()):
+        words.pop()
+    return " ".join(words)
+
+
 # ---------- запись карточек ----------
 
 def new_card(name: str, fact: dict[str, list[str]], now: datetime) -> str:
@@ -378,9 +390,9 @@ def _unique(folder: Path, name: str) -> Path:
     return path
 
 
-def _homonyms(entries: list[dict]) -> bool:
+def _homonyms(entries: list[dict], keys: tuple[str, ...] = ("phones", "birthday", "company")) -> bool:
     """Тёзки: у двух карточек группы заполнены телефоны, день рождения или компания, и они не совпадают."""
-    for key in ("phones", "birthday", "company"):
+    for key in keys:
         sets = []
         for e in entries:
             values = {re.sub(r"\D", "", v) if key == "phones" else _norm_name(v) for v in as_list(e["front"].get(key))}
@@ -403,7 +415,7 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
     folder = vault / PEOPLE_DIR
     if not folder.is_dir():
         return report
-    groups: dict[str, list[dict]] = {}
+    entries_all: list[dict] = []
     for path in sorted(folder.glob("*.md")):
         try:
             text = path.read_text(encoding="utf-8")
@@ -421,13 +433,21 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
         name = safe_name(name)
         if not name:
             continue
-        groups.setdefault(_norm_name(name), []).append(
-            {"path": path, "text": text, "front": front, "body": body, "name": name, "desc": desc,
-             "plain": not desc and safe_name(path.stem) == name})
+        entries_all.append({"path": path, "text": text, "front": front, "body": body, "name": name, "desc": desc,
+                            "plain": not desc and safe_name(path.stem) == name})
+    exact = {_norm_name(e["name"]) for e in entries_all}
+    for e in entries_all:                      # «Имя Рабочий» — это номер человека «Имя», если такая карточка есть
+        base = strip_label(e["name"])
+        if base != e["name"] and _norm_name(base) in exact:
+            e["label"], e["name"], e["desc"], e["plain"] = e["name"][len(base):].strip(), base, "", False
+    groups: dict[str, list[dict]] = {}
+    for e in entries_all:
+        groups.setdefault(_norm_name(e["name"]), []).append(e)
     for entries in groups.values():
         if len(entries) == 1 and not entries[0]["desc"] and entries[0]["plain"]:
             continue
-        if len(entries) > 1 and _homonyms(entries):
+        keys = ("birthday", "company") if any(e.get("label") for e in entries) else ("phones", "birthday", "company")
+        if len(entries) > 1 and _homonyms(entries, keys):
             report["homonyms"].append(", ".join(e["path"].stem for e in entries))
             continue                                         # разные телефоны, день рождения или компания: это разные люди
         primary = next((e for e in entries if e["plain"]), None) or next((e for e in entries if not e["desc"]), None)
@@ -442,6 +462,8 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
         text = primary["text"]
         for dup in rest:
             fact = _facts_from_front(dup["front"], dup["desc"])
+            if dup.get("label") and fact.get("phones"):
+                fact["notes"] = [f"Номер «{dup['label']}»: {', '.join(fact['phones'])}"]
             text, _ = merge_into_card(text, fact)
             extra = _useful_body(dup["body"])
             if extra and extra not in text:

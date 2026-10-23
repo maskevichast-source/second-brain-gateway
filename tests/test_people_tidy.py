@@ -90,3 +90,19 @@ def test_server_person_title_is_name_only():
     assert note.title == "Асхат"
     md = note.markdown()
     assert 'title: "Асхат"' in md and "работает в BI Group" in md
+
+
+def test_tidy_merges_phone_label_card_into_base_person(tmp_path):
+    put(tmp_path, "Eichholtz.md", person("Eichholtz", 'phones:\n  - "+7 700 111 11 11"\n'))
+    put(tmp_path, "Eichholtz Рабочий.md", person("Eichholtz Рабочий", 'phones:\n  - "+7 700 222 22 22"\n', body="Это рабочий номер"))
+    plan = vp.tidy(tmp_path)
+    assert plan["merged"] == ["Eichholtz Рабочий -> Eichholtz"] and not plan["homonyms"]
+    vp.tidy(tmp_path, apply=True)
+    card = (tmp_path / "1-Люди/Eichholtz.md").read_text(encoding="utf-8")
+    assert "+7 700 222 22 22" in card and "+7 700 111 11 11" in card and "Рабочий" in card
+
+
+def test_tidy_keeps_lone_label_card(tmp_path):
+    put(tmp_path, "Иван Рабочий.md", person("Иван Рабочий", 'phones:\n  - "+7 700 111 11 11"\n'))
+    plan = vp.tidy(tmp_path, apply=True)
+    assert plan["merged"] == [] and (tmp_path / "1-Люди/Иван Рабочий.md").exists()

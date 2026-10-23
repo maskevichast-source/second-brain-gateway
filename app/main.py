@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from . import people_links as people_links_module
 from . import ada as ada_module
 from . import ask as ask_module
 from . import files as files_module
@@ -724,10 +725,15 @@ def create_app(
         if kind == "remember":
             back = review_module.format_resurface(review_module.pick_resurface(notes, now.date(), count=3, min_age=14), now.date())
             return back or "Пока нет достаточно старых идей и хотелок, чтобы вспомнить."
-        if kind in ("brief", "who"):
-            return review_module.build_brief(notes, arg, now, ada_text)
+        if kind in ("brief", "who", "person"):
+            text = review_module.build_brief(notes, arg, now, ada_text)
+            found = people_links_module.find_card(db.snapshot_items(), arg)
+            return (text, people_links_module.person_buttons(found[0])) if found else text
         if kind == "radar":
-            return review_module.build_radar(notes, now.date())
+            names: list[str] = []
+            text = review_module.build_radar(notes, now.date(), names_out=names)
+            buttons = people_links_module.radar_buttons(db.snapshot_items(), names)
+            return (text, buttons) if buttons else text
         if kind == "promises":
             return review_module.build_promises(notes, now.date())
         result = await ask_module.answer_question(

@@ -14,11 +14,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from . import actions as actions_module
 from . import contacts_review
 from . import owner as owner_module
+from . import people_links as people_links_module
 from . import diary, interview
 from . import jarvis as jarvis_module
 from . import when as when_module
@@ -39,6 +41,7 @@ HELP = (
     "• /diary — вечерний дневник: расспрошу про день. Или сразу «дневник: текст». Время напоминания: /diary время 22:00.\n"
     "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки. Посреди интервью можно писать «повтори», «назад», «сколько осталось», «стоп»; /interview 22 — с вопроса 22.\n"
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
+    "/person Имя — вся карточка человека: данные, контакты, дела, события, покупки, документы, когда писать в следующий раз, с кнопками. "
     "/who Имя (или /brief) — что знать перед встречей, /promises — кто что кому обещал, /radar — с кем давно не общались, /budget — бюджет из «Ады».\n"
     "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
     "• /me Имя Фамилия, Псевдоним — скажи, кто ты: карточки на твоё имя (в любом порядке слов) я не буду спрашивать и считать «давно не общались».\n"
@@ -170,6 +173,8 @@ async def handle_update(
     if isinstance(callback, dict):
         if str(callback.get("data") or "").startswith("cr:"):
             reply = await _contacts_relation(callback, settings, db, process, clock)
+        elif str(callback.get("data") or "").startswith("pm:"):
+            reply = await _person_remind(callback, settings, db, process)
         else:
             reply = _callback(callback, settings, db, clock)
         if reply and reply.get("method") != "answerCallbackQuery":
@@ -274,8 +279,18 @@ async def _save(db: Database, process: Processor, *, capture_id: str, content: s
             for f in files:
                 f["markdown"] = sources_module.attach(f["markdown"], planned)
             db.enqueue_files(capture_id, planned)
+        try:
+            items = db.snapshot_items()
+            for f in files:
+                f["markdown"] = people_links_module.link_project(f["markdown"], items)
+        except Exception as exc:  # noqa: BLE001 — связь с проектом не обязательна, заметка важнее
+            logger.warning("telegram: привязка к проекту не удалась (%s)", type(exc).__name__)
         db.enqueue(capture_id, files)
         _learn_people(db, response)
+        try:
+            people_links_module.auto_contacts(db, files, datetime.now(timezone.utc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram: last_contact не обновлён (%s)", type(exc).__name__)
     return response
 
 
@@ -347,7 +362,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             current = db.get_state(chat_id)
             if current and current[0] in ("interview", "person", "diary", "contacts", "purchase"):
                 command, text = "/stop", "/stop"
-    if command in ("/ask", "/day", "/tasks", "/import", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
+    if command in ("/ask", "/day", "/tasks", "/import", "/week", "/brief", "/who", "/person", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
             return _reply(chat_id, "Эта команда пока недоступна.")
@@ -357,8 +372,8 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             arg = arg.split()[0] if arg.split() and arg.split()[0].isdigit() else ""
         if command == "/ask" and not arg:
             return _reply(chat_id, "Напиши вопрос после команды, например: /ask что я обещал Серику?")
-        if command in ("/brief", "/who") and not arg:
-            return _reply(chat_id, "О ком? Например: /who Серик")
+        if command in ("/brief", "/who", "/person") and not arg:
+            return _reply(chat_id, "О ком? Например: /person Серик")
         result = await secretary(command[1:], arg[:1000])
         return _reply(chat_id, *result) if isinstance(result, tuple) else _reply(chat_id, result)
     if command == "/done" and len(words) == 1:
@@ -459,6 +474,8 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         meta = _interview_meta(chat_id, text, state[1], db)
         if meta:
             return meta
+    if state and state[0] == "evnote" and command in ("", "/skip") and not (command == "" and _URL.search(text)):
+        return await _event_note(chat_id, update_id, text, command, state[1], db, process, now)
     if state and state[0] == "purchase" and command in ("", "/skip", "/done"):
         return await _purchase_message(chat_id, update_id, text if command == "" else "готово", state[1], db, process, now)
     if state and state[0] == "contacts" and command in ("", "/skip") and not (
@@ -550,6 +567,9 @@ def _contacts_step(chat_id: int, db: Database, data: dict, prefix: str = "") -> 
         i += 1                                                  # карточка пропала из среза: идём дальше
     data = {**data, "i": i}
     head = (prefix + "\n\n") if prefix else ""
+    if i >= len(keys) and data.get("single"):
+        db.clear_state(chat_id)
+        return (f"{head}Готово, добавил в карточку." if data.get("saved") else f"{head}Ок, ничего не менял."), None
     if i >= len(keys):
         db.clear_state(chat_id)
         return (f"{head}Готово. Заполнено: {data.get('saved', 0)}, убрано в архив: {data.get('deleted', 0)}, "
@@ -563,6 +583,78 @@ def _contacts_advance(chat_id: int, db: Database, data: dict, outcome: str, pref
     counters = {"saved": "saved", "deleted": "deleted", "skipped": "skipped"}
     data = {**data, "i": data["i"] + 1, counters[outcome]: data.get(counters[outcome], 0) + 1}
     return _contacts_step(chat_id, db, data, prefix)
+
+
+def _person_callback(action: str, key: str, chat_id: int, db: Database, now, edit, toast) -> dict:
+    """Кнопки под карточкой человека и радаром: «связались», «реже напоминать», «добавить факт»."""
+    card = _contacts_card(db, key)
+    if not card:
+        return toast("Карточка уже не в срезе (синхронизация обновила данные)")
+    row_key, front = card
+    title = str(front.get("title", ""))
+    if action == "pc":
+        changed = people_links_module.mark_contact(db, row_key, front, now.date(), now)
+        return toast(f"Записал: {title}, связались сегодня" if changed else f"{title}: сегодня уже отмечено")
+    if action == "pq":
+        people_links_module.set_cadence(db, row_key, front, 365, now)
+        return toast(f"{title}: напоминать раз в год")
+    db.set_state(chat_id, "contacts", {"keys": [key], "i": 0, "saved": 0, "deleted": 0, "skipped": 0, "single": True})
+    return edit(f"Что добавить про {title}? Одним сообщением: телефон, где работает, что важно помнить. /skip отменит.")
+
+
+def _event_callback(action: str, key: str, chat_id: int, db: Database, now, edit, toast) -> dict:
+    """Кнопки под вопросом «как прошло?» после события с людьми."""
+    card = _contacts_card(db, key)
+    if not card:
+        return toast("Событие уже не в срезе")
+    row_key, front = card
+    title = str(front.get("title", ""))
+    if action == "es":
+        return edit(f"Ок, про «{title}» больше не спрашиваю.")
+    if action == "ex":
+        actions_module.apply(db, key, "cancel", now)
+        return edit(f"Отметил: «{title}» не состоялось.")
+    if action == "eo":
+        actions_module.apply(db, key, "done", now)
+        touched = people_links_module.event_done(db, row_key, front, now)
+        tail = f" Отметил контакт: {', '.join(touched[:4])}." if touched else ""
+        return edit(f"✅ «{title}» состоялось.{tail}")
+    db.set_state(chat_id, "evnote", {"h": key})
+    return edit(f"Что было на «{title}»? Одним сообщением: о чём договорились, что пообещали, что сделать дальше. "
+                "Дела и обещания я вынесу отдельно. /skip отменит.")
+
+
+async def _event_note(chat_id: int, update_id: int, text: str, command: str, data: dict, db: Database,
+                      process: Processor, now) -> dict:
+    card = _contacts_card(db, data.get("h", ""))
+    db.clear_state(chat_id)
+    if not card or command == "/skip":
+        return _reply(chat_id, "Ок, итог не записываю.")
+    row_key, front = card
+    title = str(front.get("title", ""))
+    people = ", ".join(people_links_module.event_people(front)) or "участники не названы"
+    content = _wrap(text, lambda t: f"Итог события «{title}» ({str(front.get('event_at', ''))[:10]}), участники: {people}. "
+                                    f"Это контакт (interaction) с этими людьми. Что нужно сделать после, отдельными заметками task; "
+                                    f"что обещали, с полем promise. Рассказ: {t}")
+    response = await _save(db, process, capture_id=f"tge-{update_id}", content=content, revision=2)
+    actions_module.apply(db, data["h"], "done", now)
+    people_links_module.event_done(db, row_key, front, now)
+    mark = "🔒 Сохранил без ИИ" if response.get("private") else "✅ Записал итог и отметил событие состоявшимся"
+    return _reply(chat_id, f"{mark}.")
+
+
+async def _person_remind(callback: dict, settings: Settings, db: Database, process: Processor) -> dict | None:
+    user_id = (callback.get("from") or {}).get("id")
+    if user_id not in settings.telegram_allowed_ids:
+        return None
+    toast = lambda text: {"method": "answerCallbackQuery", "callback_query_id": callback.get("id", ""), "text": text}  # noqa: E731
+    key = str(callback.get("data") or "")[3:]
+    card = _contacts_card(db, key) if re.fullmatch(r"[0-9a-f]{12}", key) else None
+    if not card:
+        return toast("Карточка уже не в срезе")
+    title = str(card[1].get("title", ""))
+    await _save(db, process, capture_id=f"tgp-{callback.get('id', key)}", content=f"Напомни мне через неделю связаться с {title}", revision=2)
+    return toast(f"Поставил: напомню через неделю связаться с {title}")
 
 
 def _contacts_start(chat_id: int, db: Database) -> dict:
@@ -1203,6 +1295,10 @@ def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict |
         return toast("Не понял кнопку")
     if action in ("cs", "cd", "cn", "cy", "cq"):
         return _contacts_callback(action, key, chat_id, db, edit, toast)
+    if action in ("pc", "pq", "pf"):
+        return _person_callback(action, key, chat_id, db, now, edit, toast)
+    if action in ("eo", "en", "ex", "es"):
+        return _event_callback(action, key, chat_id, db, now, edit, toast)
     if action == "ok":
         db.set_setting(f"rem_{key}", "done")
         text = "Ок, больше не напомню"

@@ -24,7 +24,7 @@ EXTRA_FIELDS = (
     "review_at", "follow_up_due", "date_from", "date_to", "finished_at", "birthday",
     "recommended_by", "creator", "year", "platform", "city", "address", "price",
     "company", "role", "phones", "email", "for_whom", "destination", "counterparty",
-    "topic", "agreements", "next_step", "next_action", "repeat", "schedule",
+    "topic", "agreements", "next_step", "next_action", "repeat", "schedule", "project",
 )
 
 
