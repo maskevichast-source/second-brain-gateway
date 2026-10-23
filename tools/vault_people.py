@@ -216,7 +216,35 @@ def collect(vault: Path):
             name = safe_name(unlink(raw))
             if name:
                 names.setdefault(name, set())
+    _fold(names, facts, cards)
     return names, facts, cards
+
+
+def _fold(names: dict, facts: dict, cards: set) -> None:
+    """Имена, которые на деле тот же человек, сводятся к одному: другой порядок слов и «Имя Рабочий» -> «Имя»."""
+    pool = set(names) | cards
+    canon: dict[str, str] = {}
+    for n in sorted(pool, key=lambda x: (x not in cards, x)):        # у кого уже есть карточка, тот и главный
+        canon.setdefault(perm_key(n), n)
+    for name in list(names):
+        target = canon.get(perm_key(name), name)
+        label = ""
+        if target == name:
+            base = strip_label(name)
+            if base != name and base in pool:
+                target, label = canon.get(perm_key(base), base), name[len(base):].strip()
+        if target == name or target not in pool:
+            continue
+        fact = facts.pop(name, {})
+        dst = facts.setdefault(target, {})
+        for key, values in fact.items():
+            for value in values:
+                if value not in dst.setdefault(key, []):
+                    dst[key].append(value)
+        if label and fact.get("phones"):
+            dst.setdefault("notes", []).append(f"Номер «{label}»: {', '.join(fact['phones'])}")
+        names.pop(name, None)
+        names.setdefault(target, set())
 
 
 _DASH = re.compile(r"\s+[—–-]\s+")
@@ -231,6 +259,11 @@ def split_title(title: str) -> tuple[str, str]:
 
 def _norm_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.casefold().replace("ё", "е")).strip()
+
+
+def perm_key(name: str) -> str:
+    """Ключ без порядка слов: «Маскевич Владислав» и «Владислав Маскевич» совпадают."""
+    return " ".join(sorted(_norm_name(name).split()))
 
 
 PHONE_LABELS = frozenset({"рабочий", "рабочая", "рабочее", "домашний", "домашняя", "мобильный", "мобильная", "личный",
@@ -406,6 +439,23 @@ def _homonyms(entries: list[dict], keys: tuple[str, ...] = ("phones", "birthday"
     return False
 
 
+def _merge_short_names(groups: dict[str, list[dict]]) -> None:
+    """Карточка из одного слова («Серик») вливается в единственную полную («Серик Нурланов»), если данные не спорят."""
+    for key in [k for k in groups if " " not in k]:
+        full = [k for k in groups if " " in k and key in k.split()]
+        if len(full) != 1 or key not in groups:
+            continue
+        merged = groups[full[0]] + groups[key]
+        if _homonyms(merged):
+            continue
+        for e in groups[key]:
+            e["label"] = e.get("label") or ""
+            e["plain"], e["desc"] = False, ""
+            e["name"] = groups[full[0]][0]["name"]
+        groups[full[0]] = merged
+        del groups[key]
+
+
 def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
     """Склеивает «Имя» и «Имя — описание» в одну карточку. Дубли не удаляются, а уезжают в 3-Архив/Люди-дубли.
 
@@ -442,7 +492,8 @@ def tidy(vault: Path, apply: bool = False) -> dict[str, list[str]]:
             e["label"], e["name"], e["desc"], e["plain"] = e["name"][len(base):].strip(), base, "", False
     groups: dict[str, list[dict]] = {}
     for e in entries_all:
-        groups.setdefault(_norm_name(e["name"]), []).append(e)
+        groups.setdefault(perm_key(e["name"]), []).append(e)
+    _merge_short_names(groups)
     for entries in groups.values():
         if len(entries) == 1 and not entries[0]["desc"] and entries[0]["plain"]:
             continue

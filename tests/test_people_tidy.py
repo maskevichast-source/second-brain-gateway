@@ -106,3 +106,47 @@ def test_tidy_keeps_lone_label_card(tmp_path):
     put(tmp_path, "Иван Рабочий.md", person("Иван Рабочий", 'phones:\n  - "+7 700 111 11 11"\n'))
     plan = vp.tidy(tmp_path, apply=True)
     assert plan["merged"] == [] and (tmp_path / "1-Люди/Иван Рабочий.md").exists()
+
+
+def test_tidy_merges_reordered_names(tmp_path):
+    put(tmp_path, "Маскевич Владислав.md", person("Маскевич Владислав", 'phones:\n  - "+7 700 111 11 11"\n'))
+    put(tmp_path, "Владислав Маскевич.md", person("Владислав Маскевич", 'company: "Банк"\n'))
+    plan = vp.tidy(tmp_path)
+    assert len(plan["merged"]) == 1
+    vp.tidy(tmp_path, apply=True)
+    left = list((tmp_path / "1-Люди").glob("*.md"))
+    assert len(left) == 1
+    text = left[0].read_text(encoding="utf-8")
+    assert "+7 700 111 11 11" in text and "Банк" in text
+
+
+def test_tidy_merges_short_name_into_unique_full_name(tmp_path):
+    put(tmp_path, "Серик.md", person("Серик", 'relation: "друг"\n'))
+    put(tmp_path, "Серик Нурланов.md", person("Серик Нурланов", 'phones:\n  - "+7 701 000 00 00"\n'))
+    assert len(vp.tidy(tmp_path)["merged"]) == 1
+    vp.tidy(tmp_path, apply=True)
+    assert [p.name for p in (tmp_path / "1-Люди").glob("*.md")] == ["Серик Нурланов.md"]
+
+
+def test_tidy_does_not_merge_short_name_when_two_full_names(tmp_path):
+    put(tmp_path, "Серик.md", person("Серик"))
+    put(tmp_path, "Серик Нурланов.md", person("Серик Нурланов"))
+    put(tmp_path, "Серик Ахметов.md", person("Серик Ахметов"))
+    assert vp.tidy(tmp_path)["merged"] == []
+
+
+def test_tidy_does_not_merge_short_name_with_conflicting_phone(tmp_path):
+    put(tmp_path, "Серик.md", person("Серик", 'phones:\n  - "+7 700 111 11 11"\n'))
+    put(tmp_path, "Серик Нурланов.md", person("Серик Нурланов", 'phones:\n  - "+7 701 000 00 00"\n'))
+    assert vp.tidy(tmp_path)["merged"] == []
+
+
+def test_run_folds_label_and_reordered_names_into_existing_card(tmp_path):
+    put(tmp_path, "Eichholtz.md", person("Eichholtz"))
+    inbox = tmp_path / "0-Inbox"
+    inbox.mkdir()
+    (inbox / "a.md").write_text(person("Eichholtz Рабочий", 'phones:\n  - "+7 700 222 22 22"\n'), encoding="utf-8")
+    (inbox / "b.md").write_text(person("Eichholtz Рабочий"), encoding="utf-8")
+    report = vp.run(tmp_path)
+    assert report["created"] == []                                      # «Eichholtz Рабочий» новой карточкой не стала
+    assert "+7 700 222 22 22" in (tmp_path / "1-Люди/Eichholtz.md").read_text(encoding="utf-8")
