@@ -515,7 +515,7 @@ class Database:
             self.set_setting("interview_progress", json.dumps({**data, "paused": False}, ensure_ascii=False))
 
     # сколько минут вопрос ждёт ответа, прежде чем бот перестанет принимать за него обычные сообщения
-    STATE_IDLE_MINUTES = {"person": 30, "diary": 180, "interview": 180, "resched": 30, "contacts": 180}
+    STATE_IDLE_MINUTES = {"person": 30, "diary": 180, "interview": 180, "resched": 30, "contacts": 180, "purchase": 120}
 
     def get_state(self, chat_id: int) -> tuple[str, dict] | None:
         with closing(self._connect()) as conn:
@@ -540,7 +540,7 @@ class Database:
                 data = {**data, "paused": True}    # долгая тишина: обычные записи снова идут как записи
                 self.set_state(chat_id, "interview", data)
                 return ("interview", data)
-            if kind in ("diary", "resched", "contacts"):
+            if kind in ("diary", "resched", "contacts", "purchase"):
                 self.clear_state(chat_id)
                 return None
         return (kind, data)

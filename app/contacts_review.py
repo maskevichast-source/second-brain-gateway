@@ -71,12 +71,18 @@ def describe(front: dict) -> str:
 def question(front: dict, position: int, total: int) -> str:
     return (f"👤 {front.get('title', '?')}  ({position + 1} из {total})\n"
             f"Что известно: {describe(front)}\n\n"
-            "Кто это и откуда вы знакомы? Ответь одним сообщением (например: «сосед по даче, помог с ремонтом»). "
-            "Или нажми кнопку: пропустить, убрать контакт в архив, остановиться.")
+            "Кто это? Нажми кнопку, если хватает роли, или ответь одним сообщением (например: «сосед по даче, помог с ремонтом»). "
+            "Не знаешь или не нужен: пропусти или убери в архив.")
+
+
+RELATIONS = {"fa": "семья", "fr": "друг", "wk": "работа, коллега", "nb": "сосед", "sv": "услуги, мастер, исполнитель", "pa": "знакомый родителей, родственник"}
+RELATION_BUTTONS = [("fa", "👨‍👩‍👧 Семья"), ("fr", "🤝 Друг"), ("wk", "💼 Работа"), ("nb", "🏠 Сосед"), ("sv", "🛠 Услуги"), ("pa", "👵 Родня")]
 
 
 def buttons(key: str) -> list[list[tuple[str, str]]]:
-    return [[("⏭ Пропустить", f"cs:{key}"), ("🗑 Убрать в архив", f"cd:{key}")], [("⛔ Стоп", f"cq:{key}")]]
+    tags = [(label, f"cr:{key}:{code}") for code, label in RELATION_BUTTONS]
+    return [tags[:3], tags[3:],
+            [("⏭ Пропустить", f"cs:{key}"), ("🗑 В архив", f"cd:{key}"), ("⛔ Стоп", f"cq:{key}")]]
 
 
 def confirm_buttons(key: str) -> list[list[tuple[str, str]]]:

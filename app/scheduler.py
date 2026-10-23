@@ -16,7 +16,9 @@ from . import actions as actions_module
 from . import ada as ada_module
 from . import ask as ask_module
 from . import diary
+from . import jarvis as jarvis_module
 from . import monitor
+from . import news as news_module
 from . import owner as owner_module
 from . import review as review_module
 from . import snapshot as snapshot_module
@@ -45,6 +47,8 @@ def push_config(db: Database) -> dict:
         "week_on": db.get_setting("push_week_on", "1") == "1",
         "health_on": db.get_setting("push_health_on", "1") == "1",
         "rem_on": db.get_setting("push_rem_on", "1") == "1",
+        "jarvis_on": db.get_setting("push_jarvis_on", "1") == "1",
+        "news_on": db.get_setting("push_news_on", "1") == "1",
     }
 
 
@@ -93,6 +97,14 @@ def due_reminders(items: list[tuple[str, dict]], db: Database, now: datetime) ->
     return out
 
 
+def reminder_buttons(key: str, note_key: str, now: datetime) -> list:
+    """Кнопки под напоминанием: главное одним нажатием. Днём предлагаем «вечером», поздно вечером «через 3 дня»."""
+    later = ("🌆 Вечером, в 19:00", f"snzev:{key}") if now.hour < 17 else ("🗓 Через 3 дня", f"snz3d:{key}")
+    return [[("✅ Сделано", f"ok:{key}"), ("⏰ Через час", f"snz1:{key}")],
+            [later, ("🌅 Завтра в 9:00", f"snz24:{key}")],
+            [("🕐 Другое время", f"it:{note_key}"), ("🗑 Отменить", f"cx:{note_key}")]]
+
+
 def week_buttons(keyed_notes: list, today, limit: int = 6) -> list:
     """Кнопки под обзором недели: открыть панель (готово, отмена, перенос) для самых просроченных дел."""
     from . import ask as ask_module
@@ -133,11 +145,28 @@ async def tick(db: Database, settings: Settings, now: datetime, send) -> int:
     # напоминания в срок (с кнопками отложить)
     if cfg["rem_on"] and notes:
         for key, title, text, note_key in due_reminders(items, db, now):
-            buttons = [[("Через час", f"snz1:{key}"), ("Завтра утром", f"snz24:{key}")],
-                       [("Сделано", f"ok:{key}"), ("⏰ Другое время", f"it:{note_key}")]]
+            buttons = reminder_buttons(key, note_key, now)
             if await broadcast(text, buttons):
                 db.set_setting(f"rem_{key}", "sent")
             sent += len(chats)
+
+    # Джарвис: крупные покупки и доходы из таблицы трат «Ады»
+    if (cfg["jarvis_on"] and ada_module.configured(settings) and not jarvis_module.is_quiet(now)
+            and jarvis_module.should_run(db, now)):
+        jarvis_module.stamp_run(db, now)
+        data = await ada_module.fetch_raw(settings)
+        for aid, text, btns in jarvis_module.due_alerts(data, db, now)[:jarvis_module.MAX_PER_RUN]:
+            if await broadcast(text, btns):
+                jarvis_module.after_sent(db, aid, now)
+            sent += len(chats)
+
+    # важные новости про сервисы (сбои, утечки, смена ключей); про безопасность пишем и ночью
+    if cfg["news_on"] and settings.news_feeds and db.get_setting("news_last_run", "") != now.strftime("%Y-%m-%d %H") + (":0" if now.minute < 30 else ":3"):
+        db.set_setting("news_last_run", now.strftime("%Y-%m-%d %H") + (":0" if now.minute < 30 else ":3"))
+        for item in (await news_module.fetch_new(db, settings.news_feeds, now))[:3]:
+            if item.critical or not jarvis_module.is_quiet(now):
+                await broadcast(news_module.format_item(item))
+                sent += len(chats)
 
     # утренняя сводка
     if cfg["morning_on"] and notes and now.hour < 12 and db.get_setting("push_morning_last", "") != today.isoformat():

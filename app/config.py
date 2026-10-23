@@ -12,6 +12,18 @@ logger = logging.getLogger(__name__)
 MIN_TOKEN_LENGTH = 24
 
 
+def _parse_feeds(raw):
+    """NEWS_FEEDS=Имя=адрес;Имя=адрес. Не задано: стандартный список. Пустая строка: выключено."""
+    if raw is None:
+        return Settings.news_feeds
+    pairs = []
+    for part in raw.split(";"):
+        name, _, url = part.partition("=")
+        if name.strip() and url.strip().startswith("https://"):
+            pairs.append((name.strip(), url.strip()))
+    return tuple(pairs)
+
+
 @dataclass(frozen=True)
 class Settings:
     capture_token: str
@@ -38,6 +50,9 @@ class Settings:
     ada_summary_token: str = field(default="", repr=False)
     telegram_bot_token: str = field(default="", repr=False)
     ada_timeout: float = 8.0
+    # ленты статусов и новостей сервисов, от которых зависит Джарвис: (название, адрес RSS/Atom). Пусто = выключено
+    news_feeds: tuple = (("Railway", "https://status.railway.com/feed.rss"), ("GitHub", "https://www.githubstatus.com/history.rss"),
+                         ("OpenAI", "https://status.openai.com/feed.rss"), ("Anthropic", "https://status.claude.com/history.rss"))
     snapshot_max_rows: int = 20000
     stt_api_key: str = field(default="", repr=False)
     stt_base_url: str = "https://api.groq.com/openai/v1"
@@ -90,6 +105,7 @@ def load_settings() -> Settings:
         outbox_ttl_days=float(os.environ.get("OUTBOX_TTL_DAYS", "45")),
         ada_summary_url=os.environ.get("ADA_SUMMARY_URL", "").strip(),
         ada_summary_token=os.environ.get("ADA_SUMMARY_TOKEN", "").strip(),
+        news_feeds=_parse_feeds(os.environ.get("NEWS_FEEDS")),
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
         stt_api_key=os.environ.get("STT_API_KEY", "").strip(),
         stt_base_url=os.environ.get("STT_BASE_URL", "https://api.groq.com/openai/v1").strip().rstrip("/"),

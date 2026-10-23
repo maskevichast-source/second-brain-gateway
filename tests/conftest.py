@@ -29,6 +29,7 @@ def make_settings(tmp_path, **overrides) -> Settings:
         max_content_chars=2000,
     )
     base.update(overrides)
+    base.setdefault("news_feeds", ())
     return Settings(**base)
 
 

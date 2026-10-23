@@ -173,6 +173,14 @@ def loans_brief(data: dict, days: int = 3) -> str:
     return "Платежи по кредитам:\n" + "\n".join(rows)
 
 
+async def fetch_raw(settings: Settings, http_client: httpx.AsyncClient | None = None) -> dict:
+    """Последний ответ «Ады» целиком (для Джарвиса). Пусто, если «Ада» не настроена или недоступна."""
+    if not configured(settings):
+        return {}
+    await fetch_summary(settings, http_client)
+    return _raw.get(settings.ada_summary_url, {})
+
+
 async def fetch_loans_brief(settings: Settings, http_client: httpx.AsyncClient | None = None) -> str:
     """Утренняя строка про ближайшие платежи по кредитам или пустая строка (Ада не настроена или недоступна)."""
     if not configured(settings):

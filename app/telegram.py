@@ -20,6 +20,7 @@ from . import actions as actions_module
 from . import contacts_review
 from . import owner as owner_module
 from . import diary, interview
+from . import jarvis as jarvis_module
 from . import when as when_module
 from . import sources as sources_module
 from .config import Settings
@@ -167,7 +168,10 @@ async def handle_update(
     """Возвращает ответ для Telegram (метод sendMessage) или None, если отвечать не нужно."""
     callback = update.get("callback_query")
     if isinstance(callback, dict):
-        reply = _callback(callback, settings, db, clock)
+        if str(callback.get("data") or "").startswith("cr:"):
+            reply = await _contacts_relation(callback, settings, db, process, clock)
+        else:
+            reply = _callback(callback, settings, db, clock)
         if reply and reply.get("method") != "answerCallbackQuery":
             await _ack_callback(settings, callback)
         return reply
@@ -341,7 +345,7 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             command, text = "/interview", "/interview"
         elif re.match(r"^(стоп|хватит|пауза|остановись|останови|закончим|заканчиваем)\W*$", low):
             current = db.get_state(chat_id)
-            if current and current[0] in ("interview", "person", "diary", "contacts"):
+            if current and current[0] in ("interview", "person", "diary", "contacts", "purchase"):
                 command, text = "/stop", "/stop"
     if command in ("/ask", "/day", "/tasks", "/import", "/week", "/brief", "/who", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
@@ -455,6 +459,8 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         meta = _interview_meta(chat_id, text, state[1], db)
         if meta:
             return meta
+    if state and state[0] == "purchase" and command in ("", "/skip", "/done"):
+        return await _purchase_message(chat_id, update_id, text if command == "" else "готово", state[1], db, process, now)
     if state and state[0] == "contacts" and command in ("", "/skip") and not (
             command == "" and (len(text) > 400 or _URL.search(text))):
         return await _contacts_answer(chat_id, update_id, text, command, state[1], db, process)
@@ -619,6 +625,93 @@ def _contacts_callback(action: str, key: str, chat_id: int, db: Database, edit, 
         left = len(data["keys"]) - data["i"]
         return edit(f"Остановился. Осталось карточек: {left}. Продолжить: /contacts")
     return edit(reply, buttons)
+
+
+# ---------- Джарвис: документы к крупной покупке ----------
+
+def _purchase_callback(action: str, key: str, chat_id: int, db: Database, now, edit, toast) -> dict:
+    meta = jarvis_module.purchase_meta(db, key)
+    if not meta:
+        return toast("Эта покупка уже не в списке")
+    title = meta["title"]
+    if action == "px":
+        jarvis_module.mark_seen(db, meta["id"])
+        return edit(f"Ок, по «{title}» больше не спрашиваю.")
+    if action == "pl":
+        jarvis_module.snooze(db, meta["id"], 3, now)
+        return edit(f"Напомню про документы на «{title}» через 3 дня.")
+    db.set_state(chat_id, "purchase", {"h": key, "mode": "docs" if action == "pd" else "warranty"})
+    if action == "pd":
+        return edit(f"Присылай по «{title}»: фото чека, договора, гарантийного талона, PDF. Можно по одному сообщению, "
+                    "подпись необязательна. Закончишь, напиши «готово».")
+    return edit(f"До какого числа гарантия на «{title}»? Напиши дату (23.10.2028) или срок («2 года», «18 месяцев»). "
+                "Если гарантии нет или не знаешь, напиши «нет».")
+
+
+async def _purchase_message(chat_id: int, update_id: int, text: str, data: dict, db: Database, process: Processor, now) -> dict:
+    meta = jarvis_module.purchase_meta(db, data.get("h", ""))
+    if not meta:
+        db.clear_state(chat_id)
+        return _reply(chat_id, "Эта покупка уже не в списке. Если хотел прислать документ, пришли его ещё раз.")
+    title = meta["title"]
+    plain = split_private(text)[1]
+    done_words = re.match(r"^(готово|всё|все|хватит|достаточно|нет|не знаю|пропусти\w*)\W*$", plain.lower())
+    if done_words or interview.is_non_answer(plain):
+        db.clear_state(chat_id)
+        jarvis_module.mark_seen(db, meta["id"])
+        return _reply(chat_id, f"Ок, по «{title}» закрыли.")
+    about = f"к покупке «{title}» ({meta.get('date', '')}, {jarvis_module.money(meta.get('amount'))}, {meta.get('merchant', '')})"
+    if data.get("mode") == "warranty":
+        until = jarvis_module.parse_warranty(plain, now.date())
+        if not until:
+            return _reply(chat_id, "Не понял срок. Напиши дату (23.10.2028) или «2 года», или «нет».")
+        content = _wrap(text, lambda t: f"Гарантия {about}: действует до {until.isoformat()}. Тип document, valid_until: {until.isoformat()}.")
+        response = await _save(db, process, capture_id=f"tgw-{update_id}", content=content, revision=2)
+        db.clear_state(chat_id)
+        jarvis_module.mark_seen(db, meta["id"])
+        return _reply(chat_id, f"✅ Гарантия до {jarvis_module.rus_date(until.isoformat())} {until.year}. Напомню за месяц до конца.")
+    content = _wrap(text, lambda t: f"Документ {about}, тип document: {t}")
+    response = await _save(db, process, capture_id=f"tgd2-{update_id}", content=content, revision=2)
+    mark = "🔒 Сохранил без ИИ" if response.get("private") else "📎 Сохранил к покупке"
+    return _reply(chat_id, f"{mark}. Ещё что-то по «{title}»? Или напиши «готово».")
+
+
+async def _contacts_relation(callback: dict, settings: Settings, db: Database, process: Processor, clock) -> dict | None:
+    """Кнопка роли («Друг», «Сосед»…) в /contacts: записывает роль без набора текста и показывает следующую карточку."""
+    user_id = (callback.get("from") or {}).get("id")
+    if user_id not in settings.telegram_allowed_ids:
+        return None
+    message = callback.get("message") or {}
+    chat_id, message_id = (message.get("chat") or {}).get("id") or user_id, message.get("message_id")
+
+    def toast(text: str) -> dict:
+        return {"method": "answerCallbackQuery", "callback_query_id": callback.get("id", ""), "text": text}
+
+    _, _, rest = str(callback.get("data") or "").partition(":")
+    key, _, code = rest.partition(":")
+    label = contacts_review.RELATIONS.get(code)
+    state = db.get_state(chat_id)
+    if not label or not re.fullmatch(r"[0-9a-f]{12}", key) or not state or state[0] != "contacts":
+        return toast("Разбор уже закончен. Начать заново: /contacts")
+    data = state[1]
+    if data["i"] >= len(data["keys"]) or data["keys"][data["i"]] != key:
+        return toast("Эта карточка уже не текущая")
+    card = _contacts_card(db, key)
+    if not card:
+        return toast("Карточки уже нет в срезе")
+    title = str(card[1].get("title", ""))
+    content = f"Данные о человеке по имени {title} (карточка, тип person): отношение ко мне — {label}."
+    update_id = callback.get("id", "0")
+    await _save(db, process, capture_id=f"tgr-{update_id}-{key}", content=content, revision=2)
+    _contacts_done_add(db, title)
+    text, buttons = _contacts_advance(chat_id, db, data, "saved", f"✅ {title}: {label}")
+    if not message_id:
+        return _reply(chat_id, text, buttons)
+    reply = {"method": "editMessageText", "chat_id": chat_id, "message_id": message_id, "text": text[:4000],
+             "disable_web_page_preview": True}
+    if buttons:
+        reply["reply_markup"] = {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
+    return reply
 
 
 def _minutes_ago(stamp: str | None) -> float:
@@ -1025,6 +1118,10 @@ def _push_command(text: str, db: Database, settings: Settings) -> str:
             db.set_setting("push_morning_on", "1")
     elif parts[:1] == ["неделя"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
         db.set_setting("push_week_on", "1" if parts[1] in ("вкл", "on") else "0")
+    elif parts[:1] == ["джарвис"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
+        db.set_setting("push_jarvis_on", "1" if parts[1] in ("вкл", "on") else "0")
+    elif parts[:1] == ["новости"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
+        db.set_setting("push_news_on", "1" if parts[1] in ("вкл", "on") else "0")
     elif parts[:1] == ["здоровье"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
         db.set_setting("push_health_on", "1" if parts[1] in ("вкл", "on") else "0")
     elif parts[:1] == ["подтверждения"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
@@ -1032,7 +1129,7 @@ def _push_command(text: str, db: Database, settings: Settings) -> str:
     elif parts[:1] == ["напоминания"] and len(parts) >= 2 and parts[1] in ("выкл", "вкл", "on", "off"):
         db.set_setting("push_rem_on", "1" if parts[1] in ("вкл", "on") else "0")
     elif parts:
-        return ("Команды: /push утро 08:30, /push утро выкл, /push неделя выкл, /push напоминания выкл, /push подтверждения выкл, /push здоровье выкл. "
+        return ("Команды: /push утро 08:30, /push утро выкл, /push неделя выкл, /push напоминания выкл, /push подтверждения выкл, /push здоровье выкл, /push джарвис выкл (покупки и доходы), /push новости выкл (сбои и утечки сервисов). "
                 "Дневник отдельно: /diary время 21:00, /diary выкл.")
     cfg = scheduler.push_config(db)
     d_on, d_at = scheduler.get_diary_config(db)
@@ -1044,6 +1141,8 @@ def _push_command(text: str, db: Database, settings: Settings) -> str:
             f"• обзор недели (воскресенье, 19:00): {yes(cfg['week_on'])}\n"
             f"• переспрашиваю, если не уверен в записи: {yes(db.get_setting('confirm_on', '1') == '1')}\n"
             f"• проверка хранилища (понедельник, 10:00): {yes(cfg['health_on'])}\n"
+            f"• крупные покупки и доходы из Ады (просит чеки и гарантии): {yes(cfg['jarvis_on'])}\n"
+            f"• новости про сбои и утечки сервисов (ночью только про безопасность): {yes(cfg['news_on'])}\n"
             f"• дневник вечером: {yes(d_on)}, {d_at}" + tail)
 
 
@@ -1140,6 +1239,18 @@ def _callback(callback: dict, settings: Settings, db: Database, clock) -> dict |
     if action == "snz1":
         db.set_setting(f"rem_{key}", (now + timedelta(hours=1)).replace(tzinfo=None, microsecond=0).isoformat(timespec="minutes"))
         return toast("Напомню через час")
+    if action == "snzev":
+        target = now.replace(hour=19, minute=0, second=0, microsecond=0, tzinfo=None)
+        if target <= now.replace(tzinfo=None):
+            target += timedelta(days=1)
+        db.set_setting(f"rem_{key}", target.isoformat(timespec="minutes"))
+        return toast("Напомню в 19:00" + (" завтра" if target.date() != now.date() else ""))
+    if action == "snz3d":
+        later = (now + timedelta(days=3)).replace(hour=9, minute=0, second=0, microsecond=0, tzinfo=None)
+        db.set_setting(f"rem_{key}", later.isoformat(timespec="minutes"))
+        return toast("Напомню через 3 дня в 9:00")
+    if action in ("pd", "pw", "pl", "px"):
+        return _purchase_callback(action, key, chat_id, db, now, edit, toast)
     if action == "snz24":
         tomorrow = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0, tzinfo=None)
         db.set_setting(f"rem_{key}", tomorrow.isoformat(timespec="minutes"))
