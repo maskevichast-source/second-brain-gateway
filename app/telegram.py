@@ -41,6 +41,8 @@ HELP = (
     "• /diary — вечерний дневник: расспрошу про день. Или сразу «дневник: текст». Время напоминания: /diary время 22:00.\n"
     "• /interview — расскажу о себе: я задам вопросы про семью, дом, работу, документы. Один блок: /interview дом, список: /interview блоки. Посреди интервью можно писать «повтори», «назад», «сколько осталось», «стоп»; /interview 22 — с вопроса 22.\n"
     "• /ask вопрос — отвечу по твоим заметкам. /day — сводка дня, /week — обзор недели, "
+    "Вопрос можно писать прямо в чат без команды: «когда щелкунчик?», «что я обещал Серику?», «где мой паспорт?». "
+    "Если я принял запись за вопрос, ответь «сохрани».\n"
     "/person Имя — вся карточка человека: данные, контакты, дела, события, покупки, документы, когда писать в следующий раз, с кнопками. "
     "/who Имя (или /brief) — что знать перед встречей, /promises — кто что кому обещал, /radar — с кем давно не общались, /budget — бюджет из «Ады».\n"
     "• /health — проверка базы (дубли, зависшее). /merge — покажу дубли: что оставить, что объединить; /merge 1 — файл-подсказка для ручного слияния. /remember — вспомню старые идеи и хотелки.\n"
@@ -327,6 +329,24 @@ def _ask_person(chat_id: int, db: Database, names: list[str], prefix: str, batch
             "день рождения) одним сообщением или /skip.")
 
 
+_QUESTION_START = re.compile(
+    r"(?is)^(?:а\s+|и\s+|ну\s+|слушай,?\s+|подскажи,?\s+|скажи,?\s+|напомни,?\s+|посмотри,?\s+|найди,?\s+|покажи,?\s+)*"
+    r"(?:когда|что|кто|где|куда|откуда|сколько|какой|какая|какое|какие|каков\w*|чей|чья|чьё|чьи|кому|кого|у кого|с кем|"
+    r"во сколько|на когда|до скольки|есть ли|был ли|была ли|было ли|были ли|помнишь|почему|зачем|как зовут|как называется)(?![\w-])")
+_SAVE_AS_NOTE = re.compile(r"(?i)^(сохрани|запиши|запомни)(\s+(это|как есть|как заметку))?\W*$")
+
+
+def is_question(text: str) -> bool:
+    """Живой вопрос к заметкам без команды: «когда щелкунчик?», «что я обещал Серику?». Длинные записи, ссылки,
+    пересылки и вложения вопросами не считаются: они сохраняются как обычно."""
+    text = text.strip()
+    if not text or len(text) > 160 or "\n" in text or _URL.search(text) or text.startswith(("Переслано от", "!")):
+        return False
+    if "вложение в Telegram" in text.lower() or text.startswith("["):
+        return False
+    return bool(_QUESTION_START.match(text))
+
+
 def _stem(name: str) -> str:
     return re.sub(r"[^а-яa-z0-9]", "", name.lower().replace("ё", "е"))[:4]
 
@@ -362,6 +382,15 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
             current = db.get_state(chat_id)
             if current and current[0] in ("interview", "person", "diary", "contacts", "purchase"):
                 command, text = "/stop", "/stop"
+    free_question = ""
+    if not command and secretary is not None:
+        saved_q = db.get_setting(f"lastq_{chat_id}", "")
+        if saved_q and _SAVE_AS_NOTE.match(text):                      # «сохрани»: прошлая фраза была записью, а не вопросом
+            db.set_setting(f"lastq_{chat_id}", "")
+            text = saved_q
+        elif not db.get_state(chat_id) and not db.get_waiting(chat_id) and is_question(text):
+            free_question = text
+            command, text = "/ask", "/ask " + text
     if command in ("/ask", "/day", "/tasks", "/import", "/week", "/brief", "/who", "/person", "/radar", "/promises", "/budget", "/health", "/remember", "/merge"):
         arg = text[len(text.split()[0]):].strip()
         if secretary is None:
@@ -375,6 +404,12 @@ async def _answer_text(message: dict, chat_id: int, update_id, *, settings: Sett
         if command in ("/brief", "/who", "/person") and not arg:
             return _reply(chat_id, "О ком? Например: /person Серик")
         result = await secretary(command[1:], arg[:1000])
+        if free_question and isinstance(result, str):
+            if "Источники:" in result:
+                db.set_setting(f"lastq_{chat_id}", "")
+            else:                                                      # ничего не нашлось: возможно, это была запись
+                db.set_setting(f"lastq_{chat_id}", free_question)
+                result += "\n\nЕсли это была запись, а не вопрос, ответь «сохрани»."
         return _reply(chat_id, *result) if isinstance(result, tuple) else _reply(chat_id, result)
     if command == "/done" and len(words) == 1:
         current = db.get_state(chat_id)

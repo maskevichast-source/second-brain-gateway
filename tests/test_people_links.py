@@ -176,3 +176,34 @@ def test_event_followup_buttons_close_event_and_mark_contact(tg, tmp_path):
     assert "состоялось" in _press(client, f"eo:{event_key}", 94)["text"]
     items = dict((f["type"], f) for _, f in db.snapshot_items())
     assert items["event"]["status"] == "состоялось" and items["person"]["last_contact"] == "2026-10-10"
+
+
+# ---------- вопросы без команды ----------
+
+def test_is_question_routes_short_retrieval_questions_only():
+    from app.telegram import is_question
+    for q in ("когда щелкунчик?", "Что я обещал Серику?", "когда там вылет в Алмату?", "Где мой паспорт", "напомни когда щелкунчик",
+              "а сколько осталось платить по Forte?", "есть ли гарантия на пылесос"):
+        assert is_question(q), q
+    for t in ("Что-то надо купить молоко", "купить шторы", "напомни купить молоко", "что такое\nвторая строка",
+              "Переслано от Серик: когда встреча", "https://example.com когда", "Я обещал Серику скинуть контакт?", "!что я принимаю",
+              "когда" + " очень длинно" * 30):
+        assert not is_question(t), t
+
+
+def test_free_question_goes_to_ask_and_save_fallback(tg, tmp_path):
+    from app.snapshot import rows_from_markdown
+
+    answers = iter([{"answer": "Щелкунчик 3 ноября.", "used": [1]}, {"answer": "Про стулья ничего нет.", "used": []}])
+
+    async def ask_stub(settings, **kwargs):
+        return next(answers)
+
+    client = tg(StubLLM(result(llm_note(type="note", title="Мысль про стулья", body="x", confidence=0.9))), ask_llm=ask_stub)
+    _db(tmp_path).snapshot_put(rows_from_markdown(note("Щелкунчик", "event", event_at="2026-11-03T19:00")))
+    first = send(client, update("когда щелкунчик?", uid=200)).json()["text"]
+    assert "3 ноября" in first and "Источники" in first and "сохрани" not in first
+    second = send(client, update("где та самая мысль про стулья?", uid=201)).json()["text"]
+    assert "ответь «сохрани»" in second
+    saved = send(client, update("сохрани", uid=202)).json()["text"]
+    assert "Мысль про стулья" in saved or "Записал" in saved
